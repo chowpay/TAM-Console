@@ -478,7 +478,7 @@ def page(title: str, body: str) -> bytes:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{esc(title)} | TAG Case Files</title>
+  <title>{esc(title)} | TAM Console</title>
   <style>
     :root {{
       color-scheme: dark;
@@ -688,15 +688,15 @@ def page(title: str, body: str) -> bytes:
 </head>
 <body>
   <script>
-    const savedTheme = localStorage.getItem("casefiles-theme") || "dark";
+    const savedTheme = localStorage.getItem("tam-console-theme") || "dark";
     document.documentElement.dataset.theme = savedTheme;
-    const savedSidebar = localStorage.getItem("casefiles-sidebar") || "collapsed";
+    const savedSidebar = localStorage.getItem("tam-console-sidebar") || "collapsed";
     document.documentElement.dataset.sidebar = savedSidebar;
     function toggleTheme() {{
       const current = document.documentElement.dataset.theme || "dark";
       const next = current === "dark" ? "light" : "dark";
       document.documentElement.dataset.theme = next;
-      localStorage.setItem("casefiles-theme", next);
+      localStorage.setItem("tam-console-theme", next);
       const button = document.getElementById("theme-toggle");
       if (button) button.textContent = next === "dark" ? "Light mode" : "Dark mode";
     }}
@@ -710,7 +710,7 @@ def page(title: str, body: str) -> bytes:
       const current = document.documentElement.dataset.sidebar || "collapsed";
       const next = current === "collapsed" ? "open" : "collapsed";
       document.documentElement.dataset.sidebar = next;
-      localStorage.setItem("casefiles-sidebar", next);
+      localStorage.setItem("tam-console-sidebar", next);
       const button = document.getElementById("sidebar-toggle");
       if (button) button.textContent = next === "collapsed" ? ">" : "<";
     }}
@@ -775,7 +775,7 @@ def page(title: str, body: str) -> bytes:
     }});
   </script>
   <header>
-    <strong><a href="/">TAG Customer Case Files</a></strong>
+    <strong><a href="/">TAM Console</a></strong>
     <button id="theme-toggle" class="theme-button" type="button" onclick="toggleTheme()">Light mode</button>
   </header>
   <main>{body}</main>
@@ -812,7 +812,7 @@ def render_home() -> bytes:
   {render_sidebar()}
   <section class="section">
     <h2>Case File Dashboard</h2>
-    <p class="muted">Track customer architecture, Jira issues, meetings, evidence, and next actions in one local place.</p>
+    <p class="muted">Technical account context, environments, tickets, staff, hardware, and evidence in one local console.</p>
     <dl class="facts">
       <dt>Customers</dt><dd>{count}</dd>
       <dt>Database</dt><dd>{esc(DB_PATH)}</dd>

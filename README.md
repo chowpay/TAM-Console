@@ -1,7 +1,7 @@
-# TAG Casefiles
+# TAM Console
 
-Local web app for customer case files: architecture, meetings, Jira/ESD links,
-notes, artifacts, and eventually daily Atlassian sync.
+Technical account context, environments, tickets, staff, hardware, meetings,
+architecture, and evidence in one local console.
 
 This repository is intended to be safe to publish as application code. Do not
 commit the local `data/` directory or real customer exports.
@@ -9,7 +9,8 @@ commit the local `data/` directory or real customer exports.
 ## Run
 
 ```bash
-cd /home/ubuntu/tag_inspect/customer_casefiles
+git clone https://github.com/chowpay/TAM-Console.git
+cd TAM-Console
 python3 app.py
 ```
 
@@ -24,6 +25,8 @@ Override:
 ```bash
 CASEFILES_HOST=127.0.0.1 CASEFILES_PORT=8787 python3 app.py
 ```
+
+Or copy `.env.sample` to `.env` and edit it.
 
 Then open:
 
@@ -47,6 +50,7 @@ staff entry.
 Ignored local/private paths:
 
 - `data/`
+- `backups/`
 - `*.db`
 - `config/atlassian_config.py`
 
@@ -73,10 +77,41 @@ You can also point to a config with:
 CASEFILES_ATLASSIAN_CONFIG=/path/to/config.py python3 app.py
 ```
 
+## systemd Deployment
+
+Recommended simple deployment path:
+
+```bash
+sudo mkdir -p /opt
+sudo git clone https://github.com/chowpay/TAM-Console.git /opt/tam-console
+sudo chown -R ubuntu:ubuntu /opt/tam-console
+cd /opt/tam-console
+cp .env.sample .env
+python3 scripts/seed_demo.py
+sudo ./scripts/install_systemd.sh
+sudo systemctl start tam-console
+```
+
+Service logs:
+
+```bash
+sudo journalctl -u tam-console -f
+```
+
+## Backup
+
+Private runtime data lives under `data/`. Back up the SQLite DB with:
+
+```bash
+./scripts/backup_data.sh
+```
+
+Set `BACKUP_DIR=/some/path` to choose a backup location.
+
 ## First Model
 
-- `customers`: customer overview and architecture notes
-- `tickets`: Jira/ESD issue links and local notes
+- `customers`: account overview and architecture notes
+- `tickets`: Jira/ESD/CS issue links and local notes
 - `meetings`: meeting summaries and action items
 - `notes`: general, architecture, risk, next action, and finding notes
 - `artifacts`: local paths or URLs for PCAPs, logs, diagrams, findings, docs
