@@ -1462,6 +1462,15 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     source_type_datalist = "".join(
         f'<option value="{esc(option)}"></option>' for option in SOURCE_TYPE_SUGGESTIONS
     )
+    customer_status_options = ("Active", "Imported", "Watching", "Inactive", "Archived")
+    def customer_status_select(selected: str = "") -> str:
+        options = []
+        for option in customer_status_options:
+            chosen = " selected" if option.lower() == (selected or "").lower() else ""
+            options.append(f'<option value="{esc(option)}"{chosen}>{esc(option)}</option>')
+        if selected and selected not in customer_status_options:
+            options.append(f'<option value="{esc(selected)}" selected>{esc(selected)}</option>')
+        return f'<select name="status">{"".join(options)}</select>'
     def env_type_select(name: str, selected: str = "") -> str:
         options = ['<option value="">Unspecified</option>']
         for option in env_type_options:
@@ -1622,6 +1631,21 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         <dt>Products</dt><dd>{esc(customer['products'])}</dd>
         <dt>Updated</dt><dd>{esc(customer['updated_at'])}</dd>
       </dl>
+      <details>
+        <summary>Edit profile</summary>
+        <form method="post" action="/customers/{esc(customer['slug'])}/profile">
+          <div class="grid-2">
+            <label>Owner<input name="owner" value="{esc(customer['owner'])}"></label>
+            <label>Region<input name="region" value="{esc(customer['region'])}"></label>
+            <label>Status{customer_status_select(customer['status'])}</label>
+            <label>Products<input name="products" value="{esc(customer['products'])}"></label>
+          </div>
+          <label>Aliases<input name="aliases" value="{esc(customer['aliases'])}"></label>
+          <label>Overview<textarea name="overview">{esc(customer['overview'])}</textarea></label>
+          <label>Architecture<textarea name="architecture">{esc(customer['architecture'])}</textarea></label>
+          <button type="submit">Save profile</button>
+        </form>
+      </details>
     </section>"""
 
     sections = {
@@ -1652,7 +1676,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <div class="grid-2">
               <label>Owner<input name="owner" value="{esc(customer['owner'])}"></label>
               <label>Region<input name="region" value="{esc(customer['region'])}"></label>
-              <label>Status<input name="status" value="{esc(customer['status'])}"></label>
+              <label>Status{customer_status_select(customer['status'])}</label>
               <label>Products<input name="products" value="{esc(customer['products'])}"></label>
             </div>
             <label>Aliases<input name="aliases" value="{esc(customer['aliases'])}"></label>
