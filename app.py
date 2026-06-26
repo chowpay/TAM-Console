@@ -1061,8 +1061,9 @@ def page(title: str, body: str) -> bytes:
       padding: 0 8px 12px;
       background: color-mix(in srgb, var(--panel-2) 45%, transparent);
     }}
-    .staff-edit {{ margin: 6px 0 0; }}
-    .staff-edit form {{ width: 100%; }}
+    .staff-edit-panel {{ display: none; margin: 6px 0 0; }}
+    .staff-edit-panel.open {{ display: block; }}
+    .staff-edit-panel form {{ width: 100%; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1359,6 +1360,10 @@ def page(title: str, body: str) -> bytes:
       }});
       search.addEventListener("input", apply);
       apply();
+    }}
+    function toggleStaffEdit(id) {{
+      const panel = document.getElementById(id);
+      if (panel) panel.classList.toggle("open");
     }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
@@ -1769,8 +1774,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             </label>"""
             for env in environments
         )
-        edit_form = f"""<details class="staff-edit">
-            <summary>Edit</summary>
+        edit_id = f"staff-edit-{s['id']}"
+        edit_form = f"""<div id="{edit_id}" class="staff-edit-panel">
             <form method="post" action="/customers/{esc(customer['slug'])}/staff-update">
               <input type="hidden" name="staff_id" value="{s['id']}">
               <div class="grid-2">
@@ -1787,7 +1792,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               </div>
               <button type="submit">Save staff</button>
             </form>
-          </details>"""
+          </div>"""
         staff_rows_parts.append(
             f"""<tr>
               <td>{esc(s['name'])}</td>
@@ -1796,9 +1801,10 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <td>{esc(s['email'])}</td>
               <td>{esc(s['slack_handle'])}</td>
               <td>{esc(s['environments']) or '<span class="muted">Customer-wide / unassigned</span>'}</td>
+              <td><button class="icon-button" type="button" onclick="toggleStaffEdit('{edit_id}')">Edit</button></td>
             </tr>
             <tr class="staff-edit-row">
-              <td colspan="6">{edit_form}</td>
+              <td colspan="7">{edit_form}</td>
             </tr>"""
         )
     staff_rows = "".join(staff_rows_parts)
@@ -1919,7 +1925,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
-          {f'<div class="table-scroll"><table class="staff-table"><thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Email</th><th>Slack</th><th>Environment mapping</th></tr></thead><tbody>{staff_rows}</tbody></table></div>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
+          {f'<div class="table-scroll"><table class="staff-table"><thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Email</th><th>Slack</th><th>Environment mapping</th><th>Edit</th></tr></thead><tbody>{staff_rows}</tbody></table></div>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
           <form method="post" action="/customers/{esc(customer['slug'])}/staff">
             <div class="grid-2">
               <label>Name<input name="name" required placeholder="Jane Smith"></label>
