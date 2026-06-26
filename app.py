@@ -379,16 +379,18 @@ def jira_site_base(base_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def jira_get_issue(issue_key: str) -> dict:
+def jira_request(path: str, payload: dict | None = None) -> dict:
     cfg = load_atlassian_config()
     site = jira_site_base(cfg.BASE_URL)
-    fields = ",".join(["summary", "status", "priority", "assignee", "updated"])
-    url = f"{site}/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}"
+    url = f"{site}{path}"
     token = base64.b64encode(f"{cfg.EMAIL}:{cfg.API_TOKEN}".encode()).decode()
+    body = json.dumps(payload).encode() if payload is not None else None
     request = Request(
         url,
+        data=body,
         headers={
             "Accept": "application/json",
+            "Content-Type": "application/json",
             "Authorization": f"Basic {token}",
         },
     )
@@ -397,9 +399,149 @@ def jira_get_issue(issue_key: str) -> dict:
             return json.loads(response.read().decode())
     except HTTPError as exc:
         body = exc.read().decode(errors="replace")[:300]
-        raise RuntimeError(f"Jira HTTP {exc.code} for {issue_key}: {body}") from exc
+        raise RuntimeError(f"Jira HTTP {exc.code}: {body}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Jira request failed for {issue_key}: {exc}") from exc
+        raise RuntimeError(f"Jira request failed: {exc}") from exc
+
+
+def jira_get_issue(issue_key: str) -> dict:
+    fields = ",".join(["summary", "status", "priority", "assignee", "updated"])
+    try:
+        return jira_request(f"/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}")
+    except RuntimeError as exc:
+        raise RuntimeError(f"{issue_key}: {exc}") from exc
+
+
+def jql_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def jira_search_issues(jql: str, max_results: int = 50) -> list[dict]:
+    fields = ["summary", "status", "priority", "assignee", "updated"]
+    data = jira_request(
+        "/rest/api/3/search/jql",
+        {
+            "jql": jql,
+            "fields": fields,
+            "maxResults": max_results,
+        },
+    )
+    return data.get("issues", [])
+
+
+def issue_to_ticket_item(issue: dict) -> dict:
+    fields = issue.get("fields", {})
+    assignee = fields.get("assignee") or {}
+    priority = fields.get("priority") or {}
+    status = fields.get("status") or {}
+    key = issue.get("key", "")
+    return {
+        "key": key,
+        "summary": fields.get("summary", ""),
+        "status": status.get("name", ""),
+        "priority": priority.get("name", ""),
+        "assignee": assignee.get("displayName", ""),
+        "updated_date": fields.get("updated", ""),
+        "url": f"{jira_site_base(load_atlassian_config().BASE_URL)}/browse/{key}",
+    }
+
+
+def upsert_ticket_items(customer_id: int, items: list[dict]) -> int:
+    ts = now_utc()
+    saved = 0
+    with db() as conn:
+        for item in items:
+            key = str(item.get("key", "")).strip()
+            if not key:
+                continue
+            updated_date = str(item.get("updated_date", "")).split("T", 1)[0]
+            conn.execute(
+                """
+                insert into tickets
+                  (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                on conflict(customer_id, key) do update set
+                  summary = excluded.summary,
+                  status = excluded.status,
+                  priority = excluded.priority,
+                  assignee = excluded.assignee,
+                  updated = excluded.updated,
+                  url = excluded.url,
+                  synced_at = excluded.synced_at
+                """,
+                (
+                    customer_id,
+                    key,
+                    item.get("summary", ""),
+                    item.get("status", ""),
+                    item.get("priority", ""),
+                    item.get("assignee", ""),
+                    updated_date,
+                    item.get("url", ""),
+                    ts,
+                    ts,
+                ),
+            )
+            saved += 1
+    return saved
+
+
+def discover_jira_tickets(customer_id: int) -> str:
+    customer = row("select name from customers where id = ?", (customer_id,))
+    orgs = rows(
+        """
+        select organization_name, organization_id
+        from customer_jira_organizations
+        where customer_id = ?
+        order by case when organization_id != '' then 0 else 1 end, organization_name
+        """,
+        (customer_id,),
+    )
+    search_specs = []
+    for org in orgs:
+        name = org["organization_name"].strip()
+        if not name:
+            continue
+        if org["organization_id"]:
+            search_specs.append(
+                (
+                    f'organization {name}',
+                    f'project = ESD AND "Organizations" = {jql_string(name)} ORDER BY updated DESC',
+                )
+            )
+        else:
+            search_specs.append(
+                (
+                    f'text {name}',
+                    f'project in (ESD, CS) AND text ~ {jql_string(name)} ORDER BY updated DESC',
+                )
+            )
+    if not search_specs and customer:
+        name = customer["name"].strip()
+        search_specs.append(
+            (
+                f'text {name}',
+                f'project in (ESD, CS) AND text ~ {jql_string(name)} ORDER BY updated DESC',
+            )
+        )
+
+    if not search_specs:
+        return "No Jira discovery terms configured for this customer."
+
+    issues_by_key = {}
+    errors = []
+    for label, jql in search_specs:
+        try:
+            for issue in jira_search_issues(jql):
+                if issue.get("key"):
+                    issues_by_key[issue["key"]] = issue_to_ticket_item(issue)
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+
+    saved = upsert_ticket_items(customer_id, list(issues_by_key.values()))
+    if errors:
+        return f"Discovered/imported {saved} Jira ticket(s). Errors: {'; '.join(errors[:3])}"
+    return f"Discovered/imported {saved} Jira ticket(s)."
 
 
 def sync_jira_tickets(customer_id: int) -> str:
@@ -419,59 +561,14 @@ def sync_jira_tickets(customer_id: int) -> str:
     for key in keys:
         try:
             issue = jira_get_issue(key)
+            items.append(issue_to_ticket_item(issue))
         except Exception as exc:
-            errors.append(f"{key}: {exc}")
+            errors.append(str(exc))
             continue
-        fields = issue.get("fields", {})
-        assignee = fields.get("assignee") or {}
-        priority = fields.get("priority") or {}
-        status = fields.get("status") or {}
-        items.append(
-            {
-                "key": issue.get("key", key),
-                "summary": fields.get("summary", ""),
-                "status": status.get("name", ""),
-                "priority": priority.get("name", ""),
-                "assignee": assignee.get("displayName", ""),
-                "updated_date": fields.get("updated", ""),
-                "url": f"{jira_site_base(load_atlassian_config().BASE_URL)}/browse/{issue.get('key', key)}",
-            }
-        )
-    synced = 0
-    ts = now_utc()
-    with db() as conn:
-        for item in items:
-            key = str(item.get("key", "")).strip()
-            if not key or item.get("error"):
-                continue
-            updated_date = str(item.get("updated_date", "")).split("T", 1)[0]
-            conn.execute(
-                """
-                update tickets
-                set summary = ?, status = ?, priority = ?, assignee = ?,
-                    updated = ?, url = ?,
-                    notes = case when ? != '' then ? else notes end,
-                    synced_at = ?
-                where customer_id = ? and key = ?
-                """,
-                (
-                    item.get("summary", ""),
-                    item.get("status", ""),
-                    item.get("priority", ""),
-                    item.get("assignee", ""),
-                    updated_date,
-                    item.get("url", ""),
-                    item.get("brief_summary", ""),
-                    item.get("brief_summary", ""),
-                    ts,
-                    customer_id,
-                    key,
-                ),
-            )
-            synced += 1
+    synced = upsert_ticket_items(customer_id, items)
     if errors:
-        return f"Synced {synced} Jira ticket(s) at {ts}. Errors: {'; '.join(errors[:3])}"
-    return f"Synced {synced} Jira ticket(s) at {ts}."
+        return f"Synced {synced} Jira ticket(s) at {now_utc()}. Errors: {'; '.join(errors[:3])}"
+    return f"Synced {synced} Jira ticket(s) at {now_utc()}."
 
 
 def render_artifact_item(artifact: sqlite3.Row) -> str:
@@ -603,6 +700,13 @@ def page(title: str, body: str) -> bytes:
       font-weight: 650;
       cursor: pointer;
     }}
+    .actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 8px 0 14px;
+    }}
+    .actions form {{ padding: 0; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1147,9 +1251,14 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit">Save ticket</button>
             </form>
           </details>
-          <form method="post" action="/customers/{esc(customer['slug'])}/sync-jira" style="margin-bottom:12px">
-            <button type="submit">Sync existing Jira tickets</button>
-          </form>
+          <div class="actions">
+            <form method="post" action="/customers/{esc(customer['slug'])}/discover-jira">
+              <button type="submit">Discover Jira tickets</button>
+            </form>
+            <form method="post" action="/customers/{esc(customer['slug'])}/sync-jira">
+              <button type="submit">Sync existing Jira tickets</button>
+            </form>
+          </div>
           {f'<div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
         </section>""",
         "staff": f"""<section class="section">
@@ -1380,6 +1489,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif action == "sync-jira":
                 message = sync_jira_tickets(cid)
+                self.send_html(render_customer(slug, "tickets", message))
+                return
+            elif action == "discover-jira":
+                message = discover_jira_tickets(cid)
                 self.send_html(render_customer(slug, "tickets", message))
                 return
             elif action == "environments":
