@@ -788,6 +788,9 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
 
 
 def import_assigned_jira_tickets() -> str:
+    before_tickets = row("select count(*) as n from tickets")["n"]
+    before_customers = row("select count(*) as n from customers")["n"]
+    before_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
     jql = "assignee = currentUser() AND project in (ESD, CS) ORDER BY updated DESC"
     issues = []
     next_token = None
@@ -822,8 +825,13 @@ def import_assigned_jira_tickets() -> str:
                 upsert_ticket_items_with_conn(conn, customer_id, [item], ts)
                 imported_keys.add(f"{customer_id}:{item.get('key', '')}")
 
+    after_tickets = row("select count(*) as n from tickets")["n"]
+    after_customers = row("select count(*) as n from customers")["n"]
+    after_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
     return (
-        f"Imported {len(imported_keys)} assigned ticket link(s) across {len(org_ids)} Jira organization(s). "
+        f"Processed {len(imported_keys)} assigned ticket link(s) across {len(org_ids)} Jira organization(s). "
+        f"Added {after_tickets - before_tickets} ticket link(s), "
+        f"{after_customers - before_customers} customer(s), and {after_orgs - before_orgs} org mapping(s). "
         f"Skipped {skipped_no_org} assigned ticket(s) with no Organization."
     )
 
@@ -1069,7 +1077,7 @@ def page(title: str, body: str) -> bytes:
       min-height: 28px;
     }}
     .tabs a.active {{ background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }}
-    .dashboard-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+    .dashboard-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }}
     .metric {{ padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
     .metric strong {{ display: block; font-size: 26px; line-height: 1.1; }}
     .metric span {{ color: var(--muted); font-size: 13px; }}
@@ -1379,15 +1387,16 @@ def render_sidebar(active_slug: str = "") -> str:
 
 def render_home(message: str = "") -> bytes:
     count = row("select count(*) as n from customers")["n"]
-    ticket_count = row("select count(*) as n from tickets")["n"]
+    ticket_count = row("select count(distinct key) as n from tickets")["n"]
     active_ticket_count = row(
         """
-        select count(*) as n
+        select count(distinct key) as n
         from tickets
         where lower(status) not in ('done', 'resolved', 'closed')
           and lower(status) not like '%resolution provided%'
         """
     )["n"]
+    ticket_link_count = row("select count(*) as n from tickets")["n"]
     org_count = row("select count(distinct organization_id) as n from customer_jira_organizations where organization_id != ''")["n"]
     recent_ticket_rows = "".join(
         f"""<tr>
@@ -1438,6 +1447,7 @@ def render_home(message: str = "") -> bytes:
         <div class="metric"><strong>{count}</strong><span>Customers</span></div>
         <div class="metric"><strong>{ticket_count}</strong><span>Tickets</span></div>
         <div class="metric"><strong>{active_ticket_count}</strong><span>Active tickets</span></div>
+        <div class="metric"><strong>{ticket_link_count}</strong><span>Ticket links</span></div>
         <div class="metric"><strong>{org_count}</strong><span>Jira orgs</span></div>
       </div>
       <div class="actions">
