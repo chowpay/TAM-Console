@@ -458,7 +458,7 @@ def jira_request(path: str, payload: dict | None = None) -> dict:
 
 
 def jira_get_issue(issue_key: str) -> dict:
-    fields = ",".join(["summary", "description", "status", "priority", "assignee", "updated"])
+    fields = ",".join(["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"])
     try:
         return jira_request(f"/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}")
     except RuntimeError as exc:
@@ -654,19 +654,49 @@ def sync_jira_tickets(customer_id: int) -> str:
     if not keys:
         return "No linked Jira tickets to sync yet."
 
-    items = []
+    refreshed = 0
+    moved = 0
+    kept_without_org = 0
     errors = []
+    ts = now_utc()
+    items_for_current = []
     for key in keys:
         try:
             issue = jira_get_issue(key)
-            items.append(issue_to_ticket_item(issue))
         except Exception as exc:
             errors.append(str(exc))
             continue
-    synced = upsert_ticket_items(customer_id, items)
+        item = issue_to_ticket_item(issue)
+        orgs = issue.get("fields", {}).get("customfield_10002") or []
+        if not orgs:
+            items_for_current.append(item)
+            kept_without_org += 1
+            continue
+        with db() as conn:
+            target_customer_ids = set()
+            for org in orgs:
+                target_customer_id = find_or_create_customer_for_org(conn, org, ts)
+                target_customer_ids.add(target_customer_id)
+                upsert_ticket_items_with_conn(conn, target_customer_id, [item], ts)
+            if customer_id not in target_customer_ids:
+                conn.execute(
+                    "delete from tickets where customer_id = ? and key = ?",
+                    (customer_id, key),
+                )
+                moved += 1
+            refreshed += 1
+
+    synced = upsert_ticket_items(customer_id, items_for_current) if items_for_current else 0
+    total_synced = refreshed + synced
+    details = []
+    if moved:
+        details.append(f"moved {moved}")
+    if kept_without_org:
+        details.append(f"kept {kept_without_org} without Jira Organization")
     if errors:
-        return f"Synced {synced} Jira ticket(s) at {now_utc()}. Errors: {'; '.join(errors[:3])}"
-    return f"Synced {synced} Jira ticket(s) at {now_utc()}."
+        details.append(f"errors: {'; '.join(errors[:3])}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return f"Synced {total_synced} Jira ticket(s) at {now_utc()}{suffix}."
 
 
 def unique_customer_slug(conn: sqlite3.Connection, name: str) -> str:
