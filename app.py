@@ -1057,22 +1057,12 @@ def page(title: str, body: str) -> bytes:
     }}
     .source-tickets ul {{ margin: 8px 0 0; padding-left: 18px; }}
     .source-tickets li {{ margin: 4px 0; }}
-    .staff-list {{ display: grid; gap: 12px; }}
-    .staff-card {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 14px;
-      background: var(--panel);
+    .staff-table .staff-edit-row td {{
+      padding: 0 8px 12px;
+      background: color-mix(in srgb, var(--panel-2) 45%, transparent);
     }}
-    .staff-card-head {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 16px;
-      align-items: start;
-    }}
-    .staff-contact {{ text-align: right; color: var(--muted); font-size: 13px; }}
-    .compact-facts {{ margin: 10px 0 0; grid-template-columns: 110px 1fr; }}
-    .staff-card details form {{ width: 100%; }}
+    .staff-edit {{ margin: 6px 0 0; }}
+    .staff-edit form {{ width: 100%; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1746,7 +1736,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </tr>"""
         for s in software
     )
-    staff_card_parts = []
+    staff_rows_parts = []
     for s in staff:
         mapped = staff_env_map.get(s["id"], {})
         source_ticket_keys = extract_ticket_keys(s["notes"])
@@ -1779,7 +1769,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             </label>"""
             for env in environments
         )
-        edit_form = f"""<details>
+        edit_form = f"""<details class="staff-edit">
             <summary>Edit</summary>
             <form method="post" action="/customers/{esc(customer['slug'])}/staff-update">
               <input type="hidden" name="staff_id" value="{s['id']}">
@@ -1798,25 +1788,20 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit">Save staff</button>
             </form>
           </details>"""
-        staff_card_parts.append(
-            f"""<article class="staff-card">
-              <div class="staff-card-head">
-                <div>
-                  <strong>{esc(s['name'])}</strong>
-                  <div class="muted">{esc(s['role']) or 'Contact'} · {esc(s['team']) or 'Team not set'}</div>
-                </div>
-                <div class="staff-contact">
-                  {esc(s['email']) or '<span class="muted">No email</span>'}
-                  {f'<br>{esc(s["slack_handle"])}' if s['slack_handle'] else ''}
-                </div>
-              </div>
-              <dl class="facts compact-facts">
-                <dt>Environments</dt><dd>{esc(s['environments']) or '<span class="muted">Customer-wide / unassigned</span>'}</dd>
-              </dl>
-              {edit_form}
-            </article>"""
+        staff_rows_parts.append(
+            f"""<tr>
+              <td>{esc(s['name'])}</td>
+              <td>{esc(s['role'])}</td>
+              <td>{esc(s['team'])}</td>
+              <td>{esc(s['email'])}</td>
+              <td>{esc(s['slack_handle'])}</td>
+              <td>{esc(s['environments']) or '<span class="muted">Customer-wide / unassigned</span>'}</td>
+            </tr>
+            <tr class="staff-edit-row">
+              <td colspan="6">{edit_form}</td>
+            </tr>"""
         )
-    staff_cards = "".join(staff_card_parts)
+    staff_rows = "".join(staff_rows_parts)
 
     section_titles = {
         "overview": "Overview",
@@ -1934,7 +1919,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
-          {f'<div class="staff-list">{staff_cards}</div>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
+          {f'<div class="table-scroll"><table class="staff-table"><thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Email</th><th>Slack</th><th>Environment mapping</th></tr></thead><tbody>{staff_rows}</tbody></table></div>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
           <form method="post" action="/customers/{esc(customer['slug'])}/staff">
             <div class="grid-2">
               <label>Name<input name="name" required placeholder="Jane Smith"></label>
