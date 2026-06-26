@@ -1029,6 +1029,15 @@ def page(title: str, body: str) -> bytes:
     .segmented button:last-child {{ border-right: 0; }}
     .segmented button.active {{ background: var(--accent); color: var(--accent-ink); }}
     .filter-count {{ color: var(--muted); font-size: 13px; }}
+    .env-map {{ display: grid; gap: 8px; }}
+    .check-row {{
+      display: grid;
+      grid-template-columns: auto minmax(120px, .45fr) minmax(160px, 1fr);
+      gap: 8px;
+      align-items: center;
+      color: var(--ink);
+    }}
+    .check-row input[type="checkbox"] {{ width: auto; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1550,6 +1559,18 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         """,
         (cid,),
     )
+    staff_environment_rows = rows(
+        """
+        select es.staff_id, es.environment_id, es.responsibility
+        from environment_staff es
+        join environments e on e.id = es.environment_id
+        where e.customer_id = ?
+        """,
+        (cid,),
+    )
+    staff_env_map = {}
+    for mapping in staff_environment_rows:
+        staff_env_map.setdefault(mapping["staff_id"], {})[mapping["environment_id"]] = mapping["responsibility"]
 
     environment_options = '<option value="">Customer-wide</option>' + "".join(
         f'<option value="{env["id"]}">{esc(env["name"])}</option>'
@@ -1685,17 +1706,47 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </tr>"""
         for s in software
     )
-    staff_rows = "".join(
-        f"""<tr>
-          <td>{esc(s['name'])}</td>
-          <td>{esc(s['role'])}</td>
-          <td>{esc(s['team'])}</td>
-          <td>{esc(s['email'])}</td>
-          <td>{esc(s['slack_handle'])}</td>
-          <td>{esc(s['environments']) or '<span class="muted">Customer-wide / unassigned</span>'}</td>
-        </tr>"""
-        for s in staff
-    )
+    staff_rows_parts = []
+    for s in staff:
+        mapped = staff_env_map.get(s["id"], {})
+        env_checks = "".join(
+            f"""<label class="check-row">
+              <input type="checkbox" name="environment_id" value="{env['id']}"{' checked' if env['id'] in mapped else ''}>
+              <span>{esc(env['name'])}</span>
+              <input name="responsibility_{env['id']}" value="{esc(mapped.get(env['id'], ''))}" placeholder="Responsibility">
+            </label>"""
+            for env in environments
+        )
+        edit_form = f"""<details>
+            <summary>Edit</summary>
+            <form method="post" action="/customers/{esc(customer['slug'])}/staff-update">
+              <input type="hidden" name="staff_id" value="{s['id']}">
+              <div class="grid-2">
+                <label>Name<input name="name" value="{esc(s['name'])}" required></label>
+                <label>Role<input name="role" value="{esc(s['role'])}"></label>
+                <label>Team<input name="team" value="{esc(s['team'])}"></label>
+                <label>Email<input name="email" value="{esc(s['email'])}"></label>
+                <label>Slack handle<input name="slack_handle" value="{esc(s['slack_handle'])}"></label>
+              </div>
+              <label>Notes<textarea name="notes">{esc(s['notes'])}</textarea></label>
+              <div class="env-map">
+                {env_checks or '<span class="muted">Add environments first.</span>'}
+              </div>
+              <button type="submit">Save staff</button>
+            </form>
+          </details>"""
+        staff_rows_parts.append(
+            f"""<tr>
+              <td>{esc(s['name'])}</td>
+              <td>{esc(s['role'])}</td>
+              <td>{esc(s['team'])}</td>
+              <td>{esc(s['email'])}</td>
+              <td>{esc(s['slack_handle'])}</td>
+              <td>{esc(s['environments']) or '<span class="muted">Customer-wide / unassigned</span>'}</td>
+              <td>{edit_form}</td>
+            </tr>"""
+        )
+    staff_rows = "".join(staff_rows_parts)
 
     section_titles = {
         "overview": "Overview",
@@ -1813,7 +1864,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
-          {f'<table><thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Email</th><th>Slack</th><th>Environment mapping</th></tr></thead><tbody>{staff_rows}</tbody></table>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
+          {f'<table><thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Email</th><th>Slack</th><th>Environment mapping</th><th>Edit</th></tr></thead><tbody>{staff_rows}</tbody></table>' if staff else '<div class="empty">No customer staff mapped yet.</div>'}
           <form method="post" action="/customers/{esc(customer['slug'])}/staff">
             <div class="grid-2">
               <label>Name<input name="name" required placeholder="Jane Smith"></label>
@@ -1941,6 +1992,7 @@ def form_data(handler: BaseHTTPRequestHandler) -> dict[str, str]:
     length = int(handler.headers.get("Content-Length", "0"))
     raw = handler.rfile.read(length).decode()
     parsed = parse_qs(raw, keep_blank_values=True)
+    handler.form_values = parsed
     return {key: values[0].strip() for key, values in parsed.items()}
 
 
@@ -2231,6 +2283,59 @@ class Handler(BaseHTTPRequestHandler):
                             ts,
                         ),
                     )
+            elif action == "staff-update":
+                staff_id = int(data["staff_id"])
+                staff_row = conn.execute(
+                    "select id from staff where id = ? and customer_id = ?",
+                    (staff_id, cid),
+                ).fetchone()
+                if staff_row is None:
+                    self.send_html(page("Not found", "<section class='section'><h2>Staff not found</h2></section>"), 404)
+                    return
+                conn.execute(
+                    """
+                    update staff
+                    set name = ?, role = ?, team = ?, email = ?, slack_handle = ?, notes = ?, updated_at = ?
+                    where id = ? and customer_id = ?
+                    """,
+                    (
+                        data.get("name", ""),
+                        data.get("role", ""),
+                        data.get("team", ""),
+                        data.get("email", ""),
+                        data.get("slack_handle", ""),
+                        data.get("notes", ""),
+                        ts,
+                        staff_id,
+                        cid,
+                    ),
+                )
+                selected_ids = []
+                for raw_id in getattr(self, "form_values", {}).get("environment_id", []):
+                    if raw_id.strip():
+                        selected_ids.append(int(raw_id))
+                conn.execute("delete from environment_staff where staff_id = ?", (staff_id,))
+                for environment_id in selected_ids:
+                    env = conn.execute(
+                        "select id from environments where id = ? and customer_id = ?",
+                        (environment_id, cid),
+                    ).fetchone()
+                    if env is None:
+                        continue
+                    conn.execute(
+                        """
+                        insert into environment_staff
+                          (environment_id, staff_id, responsibility, created_at)
+                        values (?, ?, ?, ?)
+                        """,
+                        (
+                            environment_id,
+                            staff_id,
+                            data.get(f"responsibility_{environment_id}", ""),
+                            ts,
+                        ),
+                    )
+                redirect_section = "staff"
             elif action == "hardware":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
                 conn.execute(
@@ -2349,6 +2454,7 @@ class Handler(BaseHTTPRequestHandler):
             "environment-update": "environments",
             "tickets": "tickets",
             "staff": "staff",
+            "staff-update": "staff",
             "hardware": "hardware",
             "software": "software",
             "meetings": "meetings",
