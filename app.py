@@ -160,6 +160,8 @@ def init_db() -> None:
               products text default '',
               overview text default '',
               architecture text default '',
+              is_pinned integer default 0,
+              sort_order integer default 0,
               created_at text not null,
               updated_at text not null
             );
@@ -306,6 +308,49 @@ def init_db() -> None:
             );
             """
         )
+        org_indexes = [
+            r["name"]
+            for r in conn.execute("pragma index_list(customer_jira_organizations)").fetchall()
+        ]
+        if "sqlite_autoindex_customer_jira_organizations_1" in org_indexes:
+            conn.execute("alter table customer_jira_organizations rename to customer_jira_organizations_old")
+            conn.execute(
+                """
+                create table customer_jira_organizations (
+                  id integer primary key,
+                  customer_id integer not null references customers(id) on delete cascade,
+                  organization_id text default '',
+                  organization_uuid text default '',
+                  organization_name text not null,
+                  normalized_name text not null,
+                  match_source text default 'manual',
+                  created_at text not null
+                )
+                """
+            )
+            conn.execute(
+                """
+                insert into customer_jira_organizations
+                  (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
+                select customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at
+                from customer_jira_organizations_old
+                """
+            )
+            conn.execute("drop table customer_jira_organizations_old")
+        conn.execute(
+            """
+            create unique index if not exists idx_customer_jira_org_id
+            on customer_jira_organizations(customer_id, organization_id)
+            where organization_id != ''
+            """
+        )
+        conn.execute(
+            """
+            create unique index if not exists idx_customer_jira_org_manual_name
+            on customer_jira_organizations(customer_id, normalized_name)
+            where organization_id = ''
+            """
+        )
         for table in ("tickets", "meetings", "notes", "artifacts"):
             cols = {
                 r["name"]
@@ -327,6 +372,14 @@ def init_db() -> None:
         }
         if "source_types" not in env_cols:
             conn.execute("alter table environments add column source_types text default ''")
+        customer_cols = {
+            r["name"]
+            for r in conn.execute("pragma table_info(customers)").fetchall()
+        }
+        if "is_pinned" not in customer_cols:
+            conn.execute("alter table customers add column is_pinned integer default 0")
+        if "sort_order" not in customer_cols:
+            conn.execute("alter table customers add column sort_order integer default 0")
 
 
 def rows(query: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -661,26 +714,46 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
             )
             customer_id = conn.execute("select last_insert_rowid() as id").fetchone()["id"]
 
-    conn.execute(
-        """
-        insert into customer_jira_organizations
-          (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
-        values (?, ?, ?, ?, ?, 'assigned-ticket-import', ?)
-        on conflict(customer_id, normalized_name) do update set
-          organization_id = excluded.organization_id,
-          organization_uuid = excluded.organization_uuid,
-          organization_name = excluded.organization_name,
-          match_source = excluded.match_source
-        """,
-        (
-            customer_id,
-            org_id,
-            str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
-            org_name,
-            normalized,
-            ts,
-        ),
-    )
+    if org_id:
+        conn.execute(
+            """
+            insert into customer_jira_organizations
+              (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
+            values (?, ?, ?, ?, ?, 'assigned-ticket-import', ?)
+            on conflict(customer_id, organization_id) where organization_id != '' do update set
+              organization_uuid = excluded.organization_uuid,
+              organization_name = excluded.organization_name,
+              normalized_name = excluded.normalized_name,
+              match_source = excluded.match_source
+            """,
+            (
+                customer_id,
+                org_id,
+                str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
+                org_name,
+                normalized,
+                ts,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            insert into customer_jira_organizations
+              (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
+            values (?, '', ?, ?, ?, 'assigned-ticket-import', ?)
+            on conflict(customer_id, normalized_name) where organization_id = '' do update set
+              organization_uuid = excluded.organization_uuid,
+              organization_name = excluded.organization_name,
+              match_source = excluded.match_source
+            """,
+            (
+                customer_id,
+                str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
+                org_name,
+                normalized,
+                ts,
+            ),
+        )
     return customer_id
 
 
@@ -817,6 +890,35 @@ def page(title: str, body: str) -> bytes:
       color: var(--ink);
     }}
     .customer-link.active, .customer-link:hover {{ background: var(--panel-2); text-decoration: none; }}
+    .customer-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: stretch;
+      margin-bottom: 4px;
+    }}
+    .customer-tools {{
+      display: flex;
+      gap: 3px;
+      align-items: center;
+    }}
+    .customer-tools form {{
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }}
+    .icon-button {{
+      min-width: 24px;
+      height: 24px;
+      padding: 0 5px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1;
+    }}
+    .pin-mark {{ color: var(--warn); font-size: 12px; margin-left: 4px; }}
+    .customer-search {{ margin: 8px 0 10px; }}
     .stack {{ display: grid; gap: 12px; align-content: start; }}
     .section {{ padding: 18px; }}
     .section h2, .section h3 {{ margin: 0 0 12px; font-size: 18px; }}
@@ -1119,9 +1221,21 @@ def page(title: str, body: str) -> bytes:
         }});
       }});
     }}
+    function initCustomerSearch() {{
+      const input = document.getElementById("customer-search");
+      if (!input) return;
+      input.addEventListener("input", () => {{
+        const query = input.value.trim().toLowerCase();
+        document.querySelectorAll(".customer-row").forEach((row) => {{
+          const text = row.textContent.toLowerCase();
+          row.style.display = !query || text.includes(query) ? "" : "none";
+        }});
+      }});
+    }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
       initSortableTables();
+      initCustomerSearch();
     }});
   </script>
   <header>
@@ -1134,18 +1248,38 @@ def page(title: str, body: str) -> bytes:
 
 
 def render_sidebar(active_slug: str = "") -> str:
-    customers = rows("select slug, name, status from customers order by name")
+    customers = rows(
+        """
+        select id, slug, name, status, is_pinned, sort_order
+        from customers
+        order by is_pinned desc,
+                 case when sort_order = 0 then 1 else 0 end,
+                 sort_order,
+                 name
+        """
+    )
     links = []
     for customer in customers:
         active = " active" if customer["slug"] == active_slug else ""
+        pin_label = "Unpin" if customer["is_pinned"] else "Pin"
+        pin_mark = '<span class="pin-mark">PIN</span>' if customer["is_pinned"] else ""
         links.append(
-            f'<a class="customer-link{active}" href="/customers/{esc(customer["slug"])}">'
-            f'{esc(customer["name"])}<br><span class="muted">{esc(customer["status"])}</span></a>'
+            f"""<div class="customer-row">
+              <a class="customer-link{active}" href="/customers/{esc(customer["slug"])}">
+                {esc(customer["name"])}{pin_mark}<br><span class="muted">{esc(customer["status"])}</span>
+              </a>
+              <div class="customer-tools">
+                <form method="post" action="/customers/{esc(customer['slug'])}/pin"><button class="icon-button" type="submit" title="{pin_label}">P</button></form>
+                <form method="post" action="/customers/{esc(customer['slug'])}/move-up"><button class="icon-button" type="submit" title="Move up">^</button></form>
+                <form method="post" action="/customers/{esc(customer['slug'])}/move-down"><button class="icon-button" type="submit" title="Move down">v</button></form>
+              </div>
+            </div>"""
         )
     return f"""<aside class="sidebar">
   <button id="sidebar-toggle" class="sidebar-toggle" type="button" onclick="toggleSidebar()" title="Toggle customers">></button>
   <div class="sidebar-content">
     <h3>Customers</h3>
+    <input id="customer-search" class="customer-search" type="search" placeholder="Search customers">
     {''.join(links) or '<p class="muted">No customers yet.</p>'}
     <hr>
     <form method="post" action="/customers" style="border:0;padding:0;margin-top:14px">
@@ -1789,6 +1923,69 @@ class Handler(BaseHTTPRequestHandler):
                         cid,
                     ),
                 )
+            elif action == "pin":
+                current = conn.execute(
+                    "select is_pinned, sort_order from customers where id = ?",
+                    (cid,),
+                ).fetchone()
+                if current["is_pinned"]:
+                    conn.execute(
+                        "update customers set is_pinned = 0, updated_at = ? where id = ?",
+                        (ts, cid),
+                    )
+                else:
+                    next_order = conn.execute(
+                        "select coalesce(max(sort_order), 0) + 10 as n from customers where is_pinned = 1"
+                    ).fetchone()["n"]
+                    conn.execute(
+                        "update customers set is_pinned = 1, sort_order = ?, updated_at = ? where id = ?",
+                        (next_order, ts, cid),
+                    )
+                redirect_section = "overview"
+            elif action in ("move-up", "move-down"):
+                conn.execute(
+                    """
+                    update customers
+                    set sort_order = case when sort_order = 0 then id * 10 else sort_order end
+                    where sort_order = 0
+                    """
+                )
+                customer_order = conn.execute(
+                    "select sort_order from customers where id = ?",
+                    (cid,),
+                ).fetchone()["sort_order"]
+                if action == "move-up":
+                    neighbor = conn.execute(
+                        """
+                        select id, sort_order from customers
+                        where is_pinned = (select is_pinned from customers where id = ?)
+                          and sort_order < ?
+                        order by sort_order desc
+                        limit 1
+                        """,
+                        (cid, customer_order),
+                    ).fetchone()
+                else:
+                    neighbor = conn.execute(
+                        """
+                        select id, sort_order from customers
+                        where is_pinned = (select is_pinned from customers where id = ?)
+                          and sort_order > ?
+                        order by sort_order asc
+                        limit 1
+                        """,
+                        (cid, customer_order),
+                    ).fetchone()
+                if neighbor is not None:
+                    conn.execute(
+                        "update customers set sort_order = ?, updated_at = ? where id = ?",
+                        (neighbor["sort_order"], ts, cid),
+                    )
+                    conn.execute(
+                        "update customers set sort_order = ?, updated_at = ? where id = ?",
+                        (customer_order, ts, neighbor["id"]),
+                    )
+                redirect_section = "overview"
             elif action == "sync-jira":
                 message = sync_jira_tickets(cid)
                 self.send_html(render_customer(slug, "tickets", message))
