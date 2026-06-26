@@ -107,6 +107,17 @@ def render_tags(value: str) -> str:
     return " ".join(f'<span class="tag">{esc(tag)}</span>' for tag in tags) or '<span class="muted">Not set</span>'
 
 
+def extract_ticket_keys(value: str) -> list[str]:
+    seen = set()
+    keys = []
+    for match in re.findall(r"\b(?:ESD|CS)-\d+\b", value or "", flags=re.I):
+        key = match.upper()
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
 def render_tag_editor(name: str, value: str = "", placeholder: str = "") -> str:
     return f"""<div class="tag-editor" data-tags="{esc(tags_csv(value))}">
       <div class="tag-editor-tags"></div>
@@ -1038,6 +1049,14 @@ def page(title: str, body: str) -> bytes:
       color: var(--ink);
     }}
     .check-row input[type="checkbox"] {{ width: auto; }}
+    .source-tickets {{
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: var(--input);
+    }}
+    .source-tickets ul {{ margin: 8px 0 0; padding-left: 18px; }}
+    .source-tickets li {{ margin: 4px 0; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1496,6 +1515,11 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         """,
         (cid,),
     )
+    tickets_by_key = {ticket["key"]: ticket for ticket in tickets}
+    try:
+        jira_browse_base = jira_site_base(load_atlassian_config().BASE_URL) + "/browse/"
+    except Exception:
+        jira_browse_base = "https://tag.atlassian.net/browse/"
     meetings = rows(
         """
         select m.*, e.name as environment_name
@@ -1709,6 +1733,28 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     staff_rows_parts = []
     for s in staff:
         mapped = staff_env_map.get(s["id"], {})
+        source_ticket_keys = extract_ticket_keys(s["notes"])
+        def source_ticket_item(key: str) -> str:
+            ticket = tickets_by_key.get(key)
+            url = ticket["url"] if ticket and ticket["url"] else jira_browse_base + key
+            summary = ticket["summary"] if ticket else ""
+            return f"""<li>
+              <a href="{esc(url)}" target="_blank">{esc(key)}</a>
+              <span class="muted">{esc(summary)}</span>
+            </li>"""
+
+        source_ticket_links = "".join(
+            source_ticket_item(key)
+            for key in source_ticket_keys
+        )
+        source_tickets = (
+            f"""<div class="source-tickets">
+              <strong>Source tickets</strong>
+              <ul>{source_ticket_links}</ul>
+            </div>"""
+            if source_ticket_links
+            else '<p class="muted">No source tickets captured for this contact yet.</p>'
+        )
         env_checks = "".join(
             f"""<label class="check-row">
               <input type="checkbox" name="environment_id" value="{env['id']}"{' checked' if env['id'] in mapped else ''}>
@@ -1729,6 +1775,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
                 <label>Slack handle<input name="slack_handle" value="{esc(s['slack_handle'])}"></label>
               </div>
               <label>Notes<textarea name="notes">{esc(s['notes'])}</textarea></label>
+              {source_tickets}
               <div class="env-map">
                 {env_checks or '<span class="muted">Add environments first.</span>'}
               </div>
