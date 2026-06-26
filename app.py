@@ -405,7 +405,7 @@ def jira_request(path: str, payload: dict | None = None) -> dict:
 
 
 def jira_get_issue(issue_key: str) -> dict:
-    fields = ",".join(["summary", "status", "priority", "assignee", "updated"])
+    fields = ",".join(["summary", "description", "status", "priority", "assignee", "updated"])
     try:
         return jira_request(f"/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}")
     except RuntimeError as exc:
@@ -417,7 +417,7 @@ def jql_string(value: str) -> str:
 
 
 def jira_search_issues(jql: str, max_results: int = 50) -> list[dict]:
-    fields = ["summary", "status", "priority", "assignee", "updated"]
+    fields = ["summary", "description", "status", "priority", "assignee", "updated"]
     data = jira_request(
         "/rest/api/3/search/jql",
         {
@@ -427,6 +427,34 @@ def jira_search_issues(jql: str, max_results: int = 50) -> list[dict]:
         },
     )
     return data.get("issues", [])
+
+
+def adf_plain_text(value: object) -> str:
+    parts = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            text = node.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            for child in node.get("content", []) or []:
+                walk(child)
+            if node.get("type") in {"paragraph", "heading", "blockquote", "listItem"}:
+                parts.append("\n")
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(value)
+    return " ".join(" ".join(parts).split())
+
+
+def brief_text(value: object, fallback: str = "", limit: int = 180) -> str:
+    text = adf_plain_text(value) if isinstance(value, (dict, list)) else str(value or "")
+    text = " ".join(text.split()) or fallback
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def issue_to_ticket_item(issue: dict) -> dict:
@@ -443,47 +471,54 @@ def issue_to_ticket_item(issue: dict) -> dict:
         "assignee": assignee.get("displayName", ""),
         "updated_date": fields.get("updated", ""),
         "url": f"{jira_site_base(load_atlassian_config().BASE_URL)}/browse/{key}",
+        "brief_summary": brief_text(fields.get("description"), fields.get("summary", "")),
     }
+
+
+def upsert_ticket_items_with_conn(conn: sqlite3.Connection, customer_id: int, items: list[dict], ts: str) -> int:
+    saved = 0
+    for item in items:
+        key = str(item.get("key", "")).strip()
+        if not key:
+            continue
+        updated_date = str(item.get("updated_date", "")).split("T", 1)[0]
+        conn.execute(
+            """
+            insert into tickets
+              (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on conflict(customer_id, key) do update set
+              summary = excluded.summary,
+              status = excluded.status,
+              priority = excluded.priority,
+              assignee = excluded.assignee,
+              updated = excluded.updated,
+              url = excluded.url,
+              notes = case when tickets.notes = '' then excluded.notes else tickets.notes end,
+              synced_at = excluded.synced_at
+            """,
+            (
+                customer_id,
+                key,
+                item.get("summary", ""),
+                item.get("status", ""),
+                item.get("priority", ""),
+                item.get("assignee", ""),
+                updated_date,
+                item.get("url", ""),
+                item.get("brief_summary", ""),
+                ts,
+                ts,
+            ),
+        )
+        saved += 1
+    return saved
 
 
 def upsert_ticket_items(customer_id: int, items: list[dict]) -> int:
     ts = now_utc()
-    saved = 0
     with db() as conn:
-        for item in items:
-            key = str(item.get("key", "")).strip()
-            if not key:
-                continue
-            updated_date = str(item.get("updated_date", "")).split("T", 1)[0]
-            conn.execute(
-                """
-                insert into tickets
-                  (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
-                on conflict(customer_id, key) do update set
-                  summary = excluded.summary,
-                  status = excluded.status,
-                  priority = excluded.priority,
-                  assignee = excluded.assignee,
-                  updated = excluded.updated,
-                  url = excluded.url,
-                  synced_at = excluded.synced_at
-                """,
-                (
-                    customer_id,
-                    key,
-                    item.get("summary", ""),
-                    item.get("status", ""),
-                    item.get("priority", ""),
-                    item.get("assignee", ""),
-                    updated_date,
-                    item.get("url", ""),
-                    ts,
-                    ts,
-                ),
-            )
-            saved += 1
-    return saved
+        return upsert_ticket_items_with_conn(conn, customer_id, items, ts)
 
 
 def discover_jira_tickets(customer_id: int) -> str:
@@ -579,6 +614,115 @@ def sync_jira_tickets(customer_id: int) -> str:
     if errors:
         return f"Synced {synced} Jira ticket(s) at {now_utc()}. Errors: {'; '.join(errors[:3])}"
     return f"Synced {synced} Jira ticket(s) at {now_utc()}."
+
+
+def unique_customer_slug(conn: sqlite3.Connection, name: str) -> str:
+    slug = slugify(name)
+    suffix = 2
+    base = slug
+    while conn.execute("select 1 from customers where slug = ?", (slug,)).fetchone():
+        slug = f"{base}-{suffix}"
+        suffix += 1
+    return slug
+
+
+def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str) -> int:
+    org_id = str(org.get("id", "") or "")
+    org_name = str(org.get("name", "") or "").strip()
+    normalized = normalize_match(org_name)
+    existing = None
+    if org_id:
+        existing = conn.execute(
+            "select customer_id from customer_jira_organizations where organization_id = ?",
+            (org_id,),
+        ).fetchone()
+    if existing is None and normalized:
+        existing = conn.execute(
+            "select customer_id from customer_jira_organizations where normalized_name = ?",
+            (normalized,),
+        ).fetchone()
+    if existing is not None:
+        customer_id = existing["customer_id"]
+    else:
+        customer = conn.execute(
+            "select id from customers where slug = ? or lower(name) = ?",
+            (slugify(org_name), org_name.lower()),
+        ).fetchone()
+        if customer is not None:
+            customer_id = customer["id"]
+        else:
+            slug = unique_customer_slug(conn, org_name)
+            conn.execute(
+                """
+                insert into customers (slug, name, status, overview, created_at, updated_at)
+                values (?, ?, 'Imported', 'Imported from assigned Jira issue Organizations.', ?, ?)
+                """,
+                (slug, org_name, ts, ts),
+            )
+            customer_id = conn.execute("select last_insert_rowid() as id").fetchone()["id"]
+
+    conn.execute(
+        """
+        insert into customer_jira_organizations
+          (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
+        values (?, ?, ?, ?, ?, 'assigned-ticket-import', ?)
+        on conflict(customer_id, normalized_name) do update set
+          organization_id = excluded.organization_id,
+          organization_uuid = excluded.organization_uuid,
+          organization_name = excluded.organization_name,
+          match_source = excluded.match_source
+        """,
+        (
+            customer_id,
+            org_id,
+            str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
+            org_name,
+            normalized,
+            ts,
+        ),
+    )
+    return customer_id
+
+
+def import_assigned_jira_tickets() -> str:
+    jql = "assignee = currentUser() AND project in (ESD, CS) ORDER BY updated DESC"
+    issues = []
+    next_token = None
+    while True:
+        payload = {
+            "jql": jql,
+            "fields": ["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"],
+            "maxResults": 100,
+        }
+        if next_token:
+            payload["nextPageToken"] = next_token
+        data = jira_request("/rest/api/3/search/jql", payload)
+        issues.extend(data.get("issues", []))
+        next_token = data.get("nextPageToken")
+        if data.get("isLast") or not next_token:
+            break
+
+    ts = now_utc()
+    imported_keys = set()
+    org_ids = set()
+    skipped_no_org = 0
+    with db() as conn:
+        for issue in issues:
+            orgs = issue.get("fields", {}).get("customfield_10002") or []
+            if not orgs:
+                skipped_no_org += 1
+                continue
+            item = issue_to_ticket_item(issue)
+            for org in orgs:
+                customer_id = find_or_create_customer_for_org(conn, org, ts)
+                org_ids.add(str(org.get("id", "") or org.get("name", "")))
+                upsert_ticket_items_with_conn(conn, customer_id, [item], ts)
+                imported_keys.add(f"{customer_id}:{item.get('key', '')}")
+
+    return (
+        f"Imported {len(imported_keys)} assigned ticket link(s) across {len(org_ids)} Jira organization(s). "
+        f"Skipped {skipped_no_org} assigned ticket(s) with no Organization."
+    )
 
 
 def render_artifact_item(artifact: sqlite3.Row) -> str:
@@ -684,6 +828,10 @@ def page(title: str, body: str) -> bytes:
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ text-align: left; vertical-align: top; padding: 9px 8px; border-bottom: 1px solid var(--line); }}
     th {{ color: var(--muted); font-weight: 600; font-size: 13px; }}
+    th.sortable {{ cursor: pointer; user-select: none; }}
+    th.sortable::after {{ content: "^v"; margin-left: 6px; font-size: 11px; opacity: .55; }}
+    th.sortable.sort-asc::after {{ content: "^"; opacity: .9; }}
+    th.sortable.sort-desc::after {{ content: "v"; opacity: .9; }}
     th:first-child, td:first-child {{ min-width: 96px; white-space: nowrap; }}
     .item {{ padding: 14px; }}
     .item + .item {{ margin-top: 10px; }}
@@ -902,8 +1050,55 @@ def page(title: str, body: str) -> bytes:
       input.addEventListener("blur", addFromInput);
       sync();
     }}
+    function sortValue(cell) {{
+      const text = (cell.textContent || "").trim();
+      const date = Date.parse(text);
+      if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}/.test(text) && !Number.isNaN(date)) {{
+        return {{ type: "number", value: date }};
+      }}
+      const ticket = text.match(/^([A-Z]+)-(\\d+)$/);
+      if (ticket) {{
+        return {{ type: "string", value: `${{ticket[1]}}-${{String(Number(ticket[2])).padStart(10, "0")}}` }};
+      }}
+      const numeric = text.replace(/,/g, "").match(/^-?\\d+(?:\\.\\d+)?$/);
+      if (numeric) {{
+        return {{ type: "number", value: Number(numeric[0]) }};
+      }}
+      return {{ type: "string", value: text.toLowerCase() }};
+    }}
+    function compareCells(aCell, bCell, direction) {{
+      const a = sortValue(aCell);
+      const b = sortValue(bCell);
+      let result = 0;
+      if (a.type === "number" && b.type === "number") {{
+        result = a.value - b.value;
+      }} else {{
+        result = String(a.value).localeCompare(String(b.value), undefined, {{ numeric: true, sensitivity: "base" }});
+      }}
+      return direction === "asc" ? result : -result;
+    }}
+    function initSortableTables() {{
+      document.querySelectorAll("table").forEach((table) => {{
+        const tbody = table.tBodies[0];
+        if (!tbody || !table.tHead) return;
+        Array.from(table.tHead.rows[0].cells).forEach((th, index) => {{
+          th.classList.add("sortable");
+          th.title = "Sort";
+          th.addEventListener("click", () => {{
+            const current = th.classList.contains("sort-asc") ? "asc" : th.classList.contains("sort-desc") ? "desc" : "";
+            const direction = current === "asc" ? "desc" : "asc";
+            Array.from(table.tHead.rows[0].cells).forEach((cell) => cell.classList.remove("sort-asc", "sort-desc"));
+            th.classList.add(direction === "asc" ? "sort-asc" : "sort-desc");
+            const rows = Array.from(tbody.rows);
+            rows.sort((a, b) => compareCells(a.cells[index] || a, b.cells[index] || b, direction));
+            rows.forEach((row) => tbody.appendChild(row));
+          }});
+        }});
+      }});
+    }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
+      initSortableTables();
     }});
   </script>
   <header>
@@ -938,19 +1133,27 @@ def render_sidebar(active_slug: str = "") -> str:
 </aside>"""
 
 
-def render_home() -> bytes:
+def render_home(message: str = "") -> bytes:
     count = row("select count(*) as n from customers")["n"]
     body = f"""<div class="layout">
   {render_sidebar()}
-  <section class="section">
-    <h2>Case File Dashboard</h2>
-    <p class="muted">Technical account context, environments, tickets, staff, hardware, and evidence in one local console.</p>
-    <dl class="facts">
-      <dt>Customers</dt><dd>{count}</dd>
-      <dt>Database</dt><dd>{esc(DB_PATH)}</dd>
-      <dt>Next build step</dt><dd>Add Atlassian sync for selected customers once the reliable JQL fields are known.</dd>
-    </dl>
-  </section>
+  <div class="stack">
+    {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
+    <section class="section">
+      <h2>Case File Dashboard</h2>
+      <p class="muted">Technical account context, environments, tickets, staff, hardware, and evidence in one local console.</p>
+      <dl class="facts">
+        <dt>Customers</dt><dd>{count}</dd>
+        <dt>Database</dt><dd>{esc(DB_PATH)}</dd>
+        <dt>Jira import</dt><dd>Imports assigned ESD/CS tickets that have Jira Organizations.</dd>
+      </dl>
+      <div class="actions">
+        <form method="post" action="/jira/import-assigned">
+          <button type="submit">Import my assigned Jira tickets</button>
+        </form>
+      </div>
+    </section>
+  </div>
 </div>"""
     return page("Dashboard", body)
 
@@ -1450,6 +1653,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         data = form_data(self)
         ts = now_utc()
+        if path == "/jira/import-assigned":
+            try:
+                message = import_assigned_jira_tickets()
+            except Exception as exc:
+                message = f"Assigned Jira import failed: {exc}"
+            self.send_html(render_home(message))
+            return
         with db() as conn:
             if path == "/customers":
                 name = data.get("name", "")
