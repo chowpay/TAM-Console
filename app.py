@@ -236,6 +236,24 @@ def init_db() -> None:
               updated_at text not null
             );
 
+            create table if not exists software_deployments (
+              id integer primary key,
+              customer_id integer not null references customers(id) on delete cascade,
+              environment_id integer references environments(id) on delete set null,
+              product text not null,
+              version text default '',
+              version_notes text default '',
+              deployment_mode text default '',
+              redundancy text default '',
+              node_count text default '',
+              status text default 'Active',
+              notes text default '',
+              source text default '',
+              confidence text default 'Needs confirmation',
+              created_at text not null,
+              updated_at text not null
+            );
+
             create table if not exists environments (
               id integer primary key,
               customer_id integer not null references customers(id) on delete cascade,
@@ -879,6 +897,16 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         """,
         (cid,),
     )
+    software = rows(
+        """
+        select s.*, e.name as environment_name
+        from software_deployments s
+        left join environments e on e.id = s.environment_id
+        where s.customer_id = ?
+        order by e.name, s.product, s.version
+        """,
+        (cid,),
+    )
     staff = rows(
         """
         select s.*,
@@ -1003,6 +1031,21 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </tr>"""
         for h in hardware
     )
+    software_rows = "".join(
+        f"""<tr>
+          <td>{esc(s['product'])}</td>
+          <td>{esc(s['environment_name']) or '<span class="muted">Customer-wide</span>'}</td>
+          <td>{esc(s['version'])}</td>
+          <td>{esc(s['version_notes'])}</td>
+          <td>{esc(s['deployment_mode'])}</td>
+          <td>{esc(s['redundancy'])}</td>
+          <td>{esc(s['node_count'])}</td>
+          <td>{esc(s['status'])}</td>
+          <td>{esc(s['confidence'])}</td>
+          <td>{esc(s['notes'])}</td>
+        </tr>"""
+        for s in software
+    )
     staff_rows = "".join(
         f"""<tr>
           <td>{esc(s['name'])}</td>
@@ -1022,6 +1065,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         "tickets": "Tickets",
         "staff": "Staff",
         "hardware": "Hardware",
+        "software": "Software",
         "meetings": "Meetings",
         "notes": "Notes",
         "artifacts": "Artifacts",
@@ -1146,6 +1190,29 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <label>Source<input name="source" placeholder="BOM, email, ticket, meeting"></label>
             <button type="submit">Add hardware</button>
           </form>
+        </section>""",
+        "software": f"""<section class="section">
+          <h3>Software</h3>
+          {f'<div class="table-scroll"><table><thead><tr><th>Product</th><th>Environment</th><th>Version</th><th>Version notes</th><th>Deployment mode</th><th>Redundancy</th><th>Nodes</th><th>Status</th><th>Confidence</th><th>Notes</th></tr></thead><tbody>{software_rows}</tbody></table></div>' if software else '<div class="empty">No software deployments yet.</div>'}
+          <details>
+            <summary>Add software</summary>
+            <form method="post" action="/customers/{esc(customer['slug'])}/software">
+              <div class="grid-2">
+                <label>Product<input name="product" required placeholder="MCM, MCS, MCR"></label>
+                <label>Environment<select name="environment_id">{environment_options}</select></label>
+                <label>Version<input name="version" placeholder="6.9.1, 6.9.2, 1.8.2"></label>
+                <label>Deployment mode<input name="deployment_mode" placeholder="Standalone, Multi-host, Clustered"></label>
+                <label>Redundancy<input name="redundancy" placeholder="1+1, N+1, Active-active, None"></label>
+                <label>Node count<input name="node_count" placeholder="2, 4, mixed"></label>
+                <label>Status<input name="status" value="Active"></label>
+                <label>Confidence<select name="confidence"><option>Needs confirmation</option><option>Likely</option><option>Confirmed</option><option>Conflicting</option><option>Stale</option></select></label>
+              </div>
+              <label>Version notes<textarea name="version_notes" placeholder="Mixed MCM versions: two nodes on 6.9.1, one on 6.9.4"></textarea></label>
+              <label>Notes<textarea name="notes"></textarea></label>
+              <label>Source<input name="source" placeholder="ticket, meeting, BOM, email, manual"></label>
+              <button type="submit">Save software</button>
+            </form>
+          </details>
         </section>""",
         "meetings": f"""<section class="section">
           <h3>Meetings</h3>
@@ -1459,6 +1526,33 @@ class Handler(BaseHTTPRequestHandler):
                         ts,
                     ),
                 )
+            elif action == "software":
+                environment_id = int(data["environment_id"]) if data.get("environment_id") else None
+                conn.execute(
+                    """
+                    insert into software_deployments
+                      (customer_id, environment_id, product, version, version_notes,
+                       deployment_mode, redundancy, node_count, status, notes,
+                       source, confidence, created_at, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cid,
+                        environment_id,
+                        data.get("product", ""),
+                        data.get("version", ""),
+                        data.get("version_notes", ""),
+                        data.get("deployment_mode", ""),
+                        data.get("redundancy", ""),
+                        data.get("node_count", ""),
+                        data.get("status", "Active"),
+                        data.get("notes", ""),
+                        data.get("source", ""),
+                        data.get("confidence", "Needs confirmation"),
+                        ts,
+                        ts,
+                    ),
+                )
             elif action == "meetings":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
                 conn.execute(
@@ -1523,6 +1617,7 @@ class Handler(BaseHTTPRequestHandler):
             "tickets": "tickets",
             "staff": "staff",
             "hardware": "hardware",
+            "software": "software",
             "meetings": "meetings",
             "notes": "notes",
             "artifacts": "artifacts",
