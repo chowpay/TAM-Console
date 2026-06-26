@@ -487,7 +487,7 @@ def upsert_ticket_items(customer_id: int, items: list[dict]) -> int:
 
 
 def discover_jira_tickets(customer_id: int) -> str:
-    customer = row("select name from customers where id = ?", (customer_id,))
+    customer = row("select name, aliases from customers where id = ?", (customer_id,))
     orgs = rows(
         """
         select organization_name, organization_id
@@ -516,14 +516,24 @@ def discover_jira_tickets(customer_id: int) -> str:
                     f'project in (ESD, CS) AND text ~ {jql_string(name)} ORDER BY updated DESC',
                 )
             )
-    if not search_specs and customer:
-        name = customer["name"].strip()
+    text_terms = []
+    if customer:
+        text_terms.append(customer["name"].strip())
+        text_terms.extend(parse_tags(customer["aliases"]))
+    seen_terms = {label for label, _ in search_specs}
+    for term in text_terms:
+        if not term:
+            continue
+        label = f"text {term}"
+        if label in seen_terms:
+            continue
         search_specs.append(
             (
-                f'text {name}',
-                f'project in (ESD, CS) AND text ~ {jql_string(name)} ORDER BY updated DESC',
+                label,
+                f'project in (ESD, CS) AND text ~ {jql_string(term)} ORDER BY updated DESC',
             )
         )
+        seen_terms.add(label)
 
     if not search_specs:
         return "No Jira discovery terms configured for this customer."
