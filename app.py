@@ -997,6 +997,30 @@ def page(title: str, body: str) -> bytes:
       margin: 8px 0 14px;
     }}
     .actions form {{ padding: 0; }}
+    .filterbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin: 0 0 12px;
+    }}
+    .filterbar input {{ max-width: 360px; }}
+    .segmented {{
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }}
+    .segmented button {{
+      border-radius: 0;
+      border-right: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      padding: 8px 10px;
+    }}
+    .segmented button:last-child {{ border-right: 0; }}
+    .segmented button.active {{ background: var(--accent); color: var(--accent-ink); }}
+    .filter-count {{ color: var(--muted); font-size: 13px; }}
     .theme-button {{
       border: 1px solid var(--line);
       background: var(--panel-2);
@@ -1262,10 +1286,43 @@ def page(title: str, body: str) -> bytes:
         }});
       }});
     }}
+    function initTicketFilters() {{
+      const table = document.querySelector("[data-ticket-table]");
+      const search = document.getElementById("ticket-search");
+      const buttons = Array.from(document.querySelectorAll("[data-ticket-filter]"));
+      const count = document.getElementById("ticket-filter-count");
+      if (!table || !search || !buttons.length) return;
+      let type = "all";
+      function apply() {{
+        const query = search.value.trim().toLowerCase();
+        let visible = 0;
+        const rows = Array.from(table.tBodies[0]?.rows || []);
+        rows.forEach((row) => {{
+          const rowType = row.dataset.ticketType || "";
+          const text = row.textContent.toLowerCase();
+          const typeMatch = type === "all" || rowType === type;
+          const textMatch = !query || text.includes(query);
+          const show = typeMatch && textMatch;
+          row.style.display = show ? "" : "none";
+          if (show) visible += 1;
+        }});
+        if (count) count.textContent = `${{visible}} of ${{rows.length}} shown`;
+      }}
+      buttons.forEach((button) => {{
+        button.addEventListener("click", () => {{
+          type = button.dataset.ticketFilter || "all";
+          buttons.forEach((b) => b.classList.toggle("active", b === button));
+          apply();
+        }});
+      }});
+      search.addEventListener("input", apply);
+      apply();
+    }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
       initSortableTables();
       initCustomerSearch();
+      initTicketFilters();
     }});
   </script>
   <header>
@@ -1541,7 +1598,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     )
 
     ticket_rows = "".join(
-        f"""<tr>
+        f"""<tr data-ticket-type="{esc(t['key'].split('-', 1)[0].lower())}">
           <td><a href="{esc(t['url'])}" target="_blank">{esc(t['key'])}</a></td>
           <td>{esc(t['summary'])}</td>
           <td>{esc(t['environment_name']) or '<span class="muted">Customer-wide</span>'}</td>
@@ -1742,7 +1799,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit">Sync existing Jira tickets</button>
             </form>
           </div>
-          {f'<div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
+          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
