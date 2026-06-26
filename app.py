@@ -817,7 +817,7 @@ def page(title: str, body: str) -> bytes:
       color: var(--ink);
     }}
     .customer-link.active, .customer-link:hover {{ background: var(--panel-2); text-decoration: none; }}
-    .stack {{ display: grid; gap: 16px; }}
+    .stack {{ display: grid; gap: 12px; align-content: start; }}
     .section {{ padding: 18px; }}
     .section h2, .section h3 {{ margin: 0 0 12px; font-size: 18px; }}
     .muted {{ color: var(--muted); }}
@@ -883,18 +883,41 @@ def page(title: str, body: str) -> bytes:
     }}
     .tabs {{
       display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      gap: 6px;
+      flex-wrap: nowrap;
+      align-items: center;
       margin: 0 0 16px;
       position: sticky;
       top: 56px;
       z-index: 1;
       background: var(--bg);
-      padding: 10px 0;
+      padding: 8px 0;
       border-bottom: 1px solid var(--line);
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: thin;
+      min-height: 42px;
+      max-height: 48px;
     }}
-    .tabs a {{ color: var(--ink); padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }}
+    .tabs a {{
+      display: inline-flex;
+      align-items: center;
+      color: var(--ink);
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      white-space: nowrap;
+      font-size: 13px;
+      line-height: 1.2;
+      min-height: 28px;
+    }}
     .tabs a.active {{ background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }}
+    .dashboard-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+    .metric {{ padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
+    .metric strong {{ display: block; font-size: 26px; line-height: 1.1; }}
+    .metric span {{ color: var(--muted); font-size: 13px; }}
+    .panel-grid {{ display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 16px; }}
     .empty {{ color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; }}
     .table-scroll {{ width: 100%; overflow-x: auto; }}
     .table-scroll table {{ min-width: 1180px; }}
@@ -959,7 +982,7 @@ def page(title: str, body: str) -> bytes:
     }}
     #tickets.section {{ padding-left: 16px; padding-right: 16px; }}
     @media (max-width: 860px) {{
-      .layout, .grid-2 {{ grid-template-columns: 1fr; }}
+      .layout, .grid-2, .dashboard-grid, .panel-grid {{ grid-template-columns: 1fr; }}
       header {{ padding: 0 14px; }}
       main {{ padding: 14px; }}
       .table-scroll table {{ min-width: 920px; }}
@@ -1135,24 +1158,83 @@ def render_sidebar(active_slug: str = "") -> str:
 
 def render_home(message: str = "") -> bytes:
     count = row("select count(*) as n from customers")["n"]
+    ticket_count = row("select count(*) as n from tickets")["n"]
+    active_ticket_count = row(
+        """
+        select count(*) as n
+        from tickets
+        where lower(status) not in ('done', 'resolved', 'closed')
+          and lower(status) not like '%resolution provided%'
+        """
+    )["n"]
+    org_count = row("select count(distinct organization_id) as n from customer_jira_organizations where organization_id != ''")["n"]
+    recent_ticket_rows = "".join(
+        f"""<tr>
+          <td><a href="/customers/{esc(r['slug'])}/tickets">{esc(r['customer_name'])}</a></td>
+          <td><a href="{esc(r['url'])}" target="_blank">{esc(r['key'])}</a></td>
+          <td>{esc(r['status'])}</td>
+          <td>{esc(r['updated'])}</td>
+        </tr>"""
+        for r in rows(
+            """
+            select c.slug, c.name as customer_name, t.key, t.status, t.updated, t.url
+            from tickets t
+            join customers c on c.id = t.customer_id
+            order by t.updated desc, t.key
+            limit 12
+            """
+        )
+    )
+    active_customer_rows = "".join(
+        f"""<tr>
+          <td><a href="/customers/{esc(r['slug'])}/tickets">{esc(r['name'])}</a></td>
+          <td>{r['open_count']}</td>
+          <td>{r['ticket_count']}</td>
+        </tr>"""
+        for r in rows(
+            """
+            select c.slug, c.name,
+                   sum(case
+                         when lower(t.status) in ('done', 'resolved', 'closed')
+                           or lower(t.status) like '%resolution provided%'
+                         then 0 else 1 end) as open_count,
+                   count(t.id) as ticket_count
+            from customers c
+            join tickets t on t.customer_id = c.id
+            group by c.id
+            order by open_count desc, ticket_count desc, c.name
+            limit 12
+            """
+        )
+    )
     body = f"""<div class="layout">
   {render_sidebar()}
   <div class="stack">
     {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
     <section class="section">
-      <h2>Case File Dashboard</h2>
-      <p class="muted">Technical account context, environments, tickets, staff, hardware, and evidence in one local console.</p>
-      <dl class="facts">
-        <dt>Customers</dt><dd>{count}</dd>
-        <dt>Database</dt><dd>{esc(DB_PATH)}</dd>
-        <dt>Jira import</dt><dd>Imports assigned ESD/CS tickets that have Jira Organizations.</dd>
-      </dl>
+      <h2>Dashboard</h2>
+      <div class="dashboard-grid">
+        <div class="metric"><strong>{count}</strong><span>Customers</span></div>
+        <div class="metric"><strong>{ticket_count}</strong><span>Tickets</span></div>
+        <div class="metric"><strong>{active_ticket_count}</strong><span>Active tickets</span></div>
+        <div class="metric"><strong>{org_count}</strong><span>Jira orgs</span></div>
+      </div>
       <div class="actions">
         <form method="post" action="/jira/import-assigned">
           <button type="submit">Import my assigned Jira tickets</button>
         </form>
       </div>
     </section>
+    <div class="panel-grid">
+      <section class="section">
+        <h3>Recent Tickets</h3>
+        {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Key</th><th>Status</th><th>Updated</th></tr></thead><tbody>{recent_ticket_rows}</tbody></table></div>' if recent_ticket_rows else '<div class="empty">No tickets imported yet.</div>'}
+      </section>
+      <section class="section">
+        <h3>Customers With Active Work</h3>
+        {f'<table><thead><tr><th>Customer</th><th>Active</th><th>Total</th></tr></thead><tbody>{active_customer_rows}</tbody></table>' if active_customer_rows else '<div class="empty">No active ticket data yet.</div>'}
+      </section>
+    </div>
   </div>
 </div>"""
     return page("Dashboard", body)
