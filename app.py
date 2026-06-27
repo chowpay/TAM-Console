@@ -112,7 +112,40 @@ def health_badge(value: str) -> str:
     key = normalize_match(health) or "unknown"
     if key not in {"green", "yellow", "red", "unknown"}:
         key = "unknown"
-    return f'<span class="health-pill health-{key}">{esc(health)}</span>'
+    return f'<span class="health-pill health-{key}"><span class="health-dot"></span>{esc(health)}</span>'
+
+
+DASHBOARD_HELP = {
+    "Customers": "Customer accounts currently tracked in TAM Console.",
+    "Tickets": "Distinct Jira ticket keys imported across all customers.",
+    "Active tickets": "Imported tickets that are not marked done, resolved, closed, or resolution provided.",
+    "Ticket links": "Total customer-to-ticket links. One Jira ticket can be linked to more than one customer.",
+    "Jira orgs": "Distinct Jira Organization IDs mapped to local customers.",
+    "Red customers": "Customers manually marked Red in the health field.",
+    "Yellow customers": "Customers manually marked Yellow in the health field.",
+    "No environments": "Customers with no environments entered yet.",
+    "Tickets missing env": "Imported tickets that are not mapped to a customer environment.",
+    "Staff missing env": "Staff contacts that are not mapped to any customer environment.",
+    "Tickets without environment": "Imported tickets that are not mapped to a customer environment.",
+    "Staff without environment": "Staff contacts that are not mapped to any customer environment.",
+    "Imported customers": "Customers created from Jira import that have not been reviewed and marked active.",
+    "No next action": "Customers without a next action entered in their profile.",
+}
+
+
+def help_label(label: str, help_text: str | None = None) -> str:
+    text = help_text or DASHBOARD_HELP.get(label, "")
+    if not text:
+        return esc(label)
+    return (
+        f'<span class="label-with-help">{esc(label)}'
+        f'<span class="help-dot" tabindex="0" title="{esc(text)}" '
+        f'aria-label="{esc(label)} help: {esc(text)}">?</span></span>'
+    )
+
+
+def metric_card(value: object, label: str, help_text: str | None = None) -> str:
+    return f'<div class="metric"><strong>{esc(value)}</strong><span class="metric-label">{help_label(label, help_text)}</span></div>'
 
 
 def extract_ticket_keys(value: str) -> list[str]:
@@ -185,6 +218,7 @@ def init_db() -> None:
               next_action_due text default '',
               last_touch text default '',
               is_pinned integer default 0,
+              is_hidden integer default 0,
               sort_order integer default 0,
               created_at text not null,
               updated_at text not null
@@ -402,6 +436,8 @@ def init_db() -> None:
         }
         if "is_pinned" not in customer_cols:
             conn.execute("alter table customers add column is_pinned integer default 0")
+        if "is_hidden" not in customer_cols:
+            conn.execute("alter table customers add column is_hidden integer default 0")
         if "sort_order" not in customer_cols:
             conn.execute("alter table customers add column sort_order integer default 0")
         for column, definition in (
@@ -990,6 +1026,24 @@ def page(title: str, body: str) -> bytes:
     }}
     .pin-mark {{ color: var(--warn); font-size: 12px; margin-left: 4px; }}
     .customer-search {{ margin: 8px 0 10px; }}
+    .sidebar-group {{
+      margin-top: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }}
+    .sidebar-group summary {{
+      display: flex;
+      justify-content: space-between;
+      width: 100%;
+      border: 0;
+      border-radius: 6px;
+      padding: 7px 8px;
+      background: var(--panel-2);
+      color: var(--ink);
+      font-size: 13px;
+    }}
+    .sidebar-group summary span {{ color: var(--muted); }}
+    .sidebar-group .customer-row:first-of-type {{ margin-top: 8px; }}
     .stack {{ display: grid; gap: 12px; align-content: start; }}
     .section {{ padding: 18px; }}
     .section h2, .section h3 {{ margin: 0 0 12px; font-size: 18px; }}
@@ -1137,20 +1191,64 @@ def page(title: str, body: str) -> bytes:
     .dashboard-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }}
     .metric {{ padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
     .metric strong {{ display: block; font-size: 26px; line-height: 1.1; }}
-    .metric span {{ color: var(--muted); font-size: 13px; }}
+    .metric .metric-label {{ color: var(--muted); font-size: 13px; }}
+    .label-with-help {{
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: inherit;
+    }}
+    .help-dot {{
+      display: inline-grid;
+      place-items: center;
+      width: 15px;
+      height: 15px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--panel-2);
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1;
+      cursor: help;
+      flex: 0 0 auto;
+    }}
+    .help-dot:hover,
+    .help-dot:focus {{
+      color: var(--ink);
+      border-color: var(--accent);
+      outline: none;
+    }}
     .panel-grid {{ display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 16px; }}
     .health-pill {{
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       border-radius: 999px;
       padding: 2px 9px;
       font-size: 12px;
       border: 1px solid var(--line);
       background: var(--panel-2);
     }}
+    .health-dot {{
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--muted);
+      box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
+    }}
     .health-green {{ color: #62d26f; }}
+    .health-green .health-dot {{ background: #62d26f; }}
     .health-yellow {{ color: #ffd166; }}
+    .health-yellow .health-dot {{ background: #ffd166; }}
     .health-red {{ color: #ff7a7a; }}
+    .health-red .health-dot {{ background: #ff7a7a; }}
     .health-unknown {{ color: var(--muted); }}
+    .health-select {{ border-left-width: 6px; }}
+    .health-select.health-green {{ border-left-color: #62d26f; }}
+    .health-select.health-yellow {{ border-left-color: #ffd166; }}
+    .health-select.health-red {{ border-left-color: #ff7a7a; }}
+    .health-select.health-unknown {{ border-left-color: var(--muted); }}
     .gap-list {{ display: grid; gap: 8px; }}
     .gap-item {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }}
     .empty {{ color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; }}
@@ -1359,6 +1457,9 @@ def page(title: str, body: str) -> bytes:
       if (!input) return;
       input.addEventListener("input", () => {{
         const query = input.value.trim().toLowerCase();
+        document.querySelectorAll(".sidebar-group").forEach((group) => {{
+          if (query) group.open = true;
+        }});
         document.querySelectorAll(".customer-row").forEach((row) => {{
           const text = row.textContent.toLowerCase();
           row.style.display = !query || text.includes(query) ? "" : "none";
@@ -1401,8 +1502,14 @@ def page(title: str, body: str) -> bytes:
       const panel = document.getElementById(id);
       if (panel) panel.classList.toggle("open");
     }}
+    function setHealthSelectClass(select) {{
+      const key = (select.value || "Unknown").toLowerCase().replace(/[^a-z0-9]+/g, "") || "unknown";
+      ["health-green", "health-yellow", "health-red", "health-unknown"].forEach((name) => select.classList.remove(name));
+      select.classList.add(["green", "yellow", "red"].includes(key) ? `health-${{key}}` : "health-unknown");
+    }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
+      document.querySelectorAll(".health-select").forEach(setHealthSelectClass);
       initSortableTables();
       initCustomerSearch();
       initTicketFilters();
@@ -1420,7 +1527,7 @@ def page(title: str, body: str) -> bytes:
 def render_sidebar(active_slug: str = "") -> str:
     customers = rows(
         """
-        select id, slug, name, status, is_pinned, sort_order
+        select id, slug, name, status, is_pinned, is_hidden, sort_order
         from customers
         order by is_pinned desc,
                  case when sort_order = 0 then 1 else 0 end,
@@ -1428,29 +1535,49 @@ def render_sidebar(active_slug: str = "") -> str:
                  name
         """
     )
-    links = []
-    for customer in customers:
+    visible_links = []
+    hidden_links = []
+
+    def customer_sidebar_row(customer: sqlite3.Row, hidden: bool = False) -> str:
         active = " active" if customer["slug"] == active_slug else ""
         pin_label = "Unpin" if customer["is_pinned"] else "Pin"
         pin_mark = '<span class="pin-mark">PIN</span>' if customer["is_pinned"] else ""
-        links.append(
-            f"""<div class="customer-row">
+        action_buttons = (
+            f"""<form method="post" action="/customers/{esc(customer['slug'])}/unhide"><button class="icon-button" type="submit" title="Show in main list">Show</button></form>"""
+            if hidden
+            else f"""<form method="post" action="/customers/{esc(customer['slug'])}/pin"><button class="icon-button" type="submit" title="{pin_label}">P</button></form>
+                <form method="post" action="/customers/{esc(customer['slug'])}/move-up"><button class="icon-button" type="submit" title="Move up">^</button></form>
+                <form method="post" action="/customers/{esc(customer['slug'])}/move-down"><button class="icon-button" type="submit" title="Move down">v</button></form>
+                <form method="post" action="/customers/{esc(customer['slug'])}/hide"><button class="icon-button" type="submit" title="Move to hidden list">Hide</button></form>"""
+        )
+        return f"""<div class="customer-row">
               <a class="customer-link{active}" href="/customers/{esc(customer["slug"])}">
                 {esc(customer["name"])}{pin_mark}<br><span class="muted">{esc(customer["status"])}</span>
               </a>
               <div class="customer-tools">
-                <form method="post" action="/customers/{esc(customer['slug'])}/pin"><button class="icon-button" type="submit" title="{pin_label}">P</button></form>
-                <form method="post" action="/customers/{esc(customer['slug'])}/move-up"><button class="icon-button" type="submit" title="Move up">^</button></form>
-                <form method="post" action="/customers/{esc(customer['slug'])}/move-down"><button class="icon-button" type="submit" title="Move down">v</button></form>
+                {action_buttons}
               </div>
             </div>"""
-        )
+
+    for customer in customers:
+        if customer["is_hidden"]:
+            hidden_links.append(customer_sidebar_row(customer, True))
+        else:
+            visible_links.append(customer_sidebar_row(customer, False))
+
+    hidden_group = ""
+    if hidden_links:
+        hidden_group = f"""<details class="sidebar-group">
+      <summary>Hidden <span>{len(hidden_links)}</span></summary>
+      {''.join(hidden_links)}
+    </details>"""
     return f"""<aside class="sidebar">
   <button id="sidebar-toggle" class="sidebar-toggle" type="button" onclick="toggleSidebar()" title="Toggle customers">></button>
   <div class="sidebar-content">
     <h3>Customers</h3>
     <input id="customer-search" class="customer-search" type="search" placeholder="Search customers">
-    {''.join(links) or '<p class="muted">No customers yet.</p>'}
+    {''.join(visible_links) or '<p class="muted">No visible customers.</p>'}
+    {hidden_group}
     <hr>
     <form method="post" action="/customers" style="border:0;padding:0;margin-top:14px">
       <label>New customer<input name="name" required placeholder="Customer name"></label>
@@ -1508,7 +1635,7 @@ def render_home(message: str = "") -> bytes:
         ),
     ]
     gap_items = "".join(
-        f"""<div class="gap-item"><span>{esc(label)}</span><strong>{count_value}</strong></div>"""
+        f"""<div class="gap-item"><span>{help_label(label)}</span><strong>{count_value}</strong></div>"""
         for label, count_value in quality_gaps
     )
     risk_rows = "".join(
@@ -1578,18 +1705,18 @@ def render_home(message: str = "") -> bytes:
     <section class="section">
       <h2>Dashboard</h2>
       <div class="dashboard-grid">
-        <div class="metric"><strong>{count}</strong><span>Customers</span></div>
-        <div class="metric"><strong>{ticket_count}</strong><span>Tickets</span></div>
-        <div class="metric"><strong>{active_ticket_count}</strong><span>Active tickets</span></div>
-        <div class="metric"><strong>{ticket_link_count}</strong><span>Ticket links</span></div>
-        <div class="metric"><strong>{org_count}</strong><span>Jira orgs</span></div>
+        {metric_card(count, "Customers")}
+        {metric_card(ticket_count, "Tickets")}
+        {metric_card(active_ticket_count, "Active tickets")}
+        {metric_card(ticket_link_count, "Ticket links")}
+        {metric_card(org_count, "Jira orgs")}
       </div>
       <div class="dashboard-grid" style="margin-top:12px">
-        <div class="metric"><strong>{red_count}</strong><span>Red customers</span></div>
-        <div class="metric"><strong>{yellow_count}</strong><span>Yellow customers</span></div>
-        <div class="metric"><strong>{quality_gaps[0][1]}</strong><span>No environments</span></div>
-        <div class="metric"><strong>{quality_gaps[1][1]}</strong><span>Tickets missing env</span></div>
-        <div class="metric"><strong>{quality_gaps[2][1]}</strong><span>Staff missing env</span></div>
+        {metric_card(red_count, "Red customers")}
+        {metric_card(yellow_count, "Yellow customers")}
+        {metric_card(quality_gaps[0][1], "No environments")}
+        {metric_card(quality_gaps[1][1], "Tickets missing env")}
+        {metric_card(quality_gaps[2][1], "Staff missing env")}
       </div>
       <div class="actions">
         <form method="post" action="/jira/import-assigned">
@@ -1741,7 +1868,13 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         for option in ("Unknown", "Green", "Yellow", "Red"):
             chosen = " selected" if option.lower() == (selected or "").lower() else ""
             options.append(f'<option value="{esc(option)}"{chosen}>{esc(option)}</option>')
-        return f'<select name="health">{"".join(options)}</select>'
+        key = normalize_match(selected or "Unknown")
+        if key not in {"green", "yellow", "red", "unknown"}:
+            key = "unknown"
+        return (
+            f'<select name="health" class="health-select health-{key}" '
+            f'onchange="setHealthSelectClass(this)">{"".join(options)}</select>'
+        )
     def env_type_select(name: str, selected: str = "") -> str:
         options = ['<option value="">Unspecified</option>']
         for option in env_type_options:
@@ -2315,6 +2448,13 @@ class Handler(BaseHTTPRequestHandler):
                         (next_order, ts, cid),
                     )
                 redirect_section = "overview"
+            elif action in ("hide", "unhide"):
+                is_hidden = 1 if action == "hide" else 0
+                conn.execute(
+                    "update customers set is_hidden = ?, updated_at = ? where id = ?",
+                    (is_hidden, ts, cid),
+                )
+                redirect_section = "overview"
             elif action in ("move-up", "move-down"):
                 conn.execute(
                     """
@@ -2332,22 +2472,24 @@ class Handler(BaseHTTPRequestHandler):
                         """
                         select id, sort_order from customers
                         where is_pinned = (select is_pinned from customers where id = ?)
+                          and is_hidden = (select is_hidden from customers where id = ?)
                           and sort_order < ?
                         order by sort_order desc
                         limit 1
                         """,
-                        (cid, customer_order),
+                        (cid, cid, customer_order),
                     ).fetchone()
                 else:
                     neighbor = conn.execute(
                         """
                         select id, sort_order from customers
                         where is_pinned = (select is_pinned from customers where id = ?)
+                          and is_hidden = (select is_hidden from customers where id = ?)
                           and sort_order > ?
                         order by sort_order asc
                         limit 1
                         """,
-                        (cid, customer_order),
+                        (cid, cid, customer_order),
                     ).fetchone()
                 if neighbor is not None:
                     conn.execute(
