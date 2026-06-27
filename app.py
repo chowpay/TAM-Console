@@ -1012,10 +1012,34 @@ def page(title: str, body: str) -> bytes:
     .customer-link.active, .customer-link:hover {{ background: var(--panel-2); text-decoration: none; }}
     .customer-row {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: 22px minmax(0, 1fr) auto;
       gap: 6px;
       align-items: stretch;
       margin-bottom: 4px;
+    }}
+    .customer-row.hidden-customer-row {{ grid-template-columns: minmax(0, 1fr) auto; }}
+    .customer-bulk-check {{
+      width: 16px;
+      height: 16px;
+      align-self: center;
+      justify-self: center;
+    }}
+    .customer-bulk-actions {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 10px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }}
+    .customer-bulk-actions button:disabled {{
+      cursor: not-allowed;
+      opacity: .45;
+    }}
+    .customer-bulk-count {{
+      color: var(--muted);
+      font-size: 12px;
     }}
     .customer-tools {{
       display: flex;
@@ -1542,6 +1566,20 @@ def page(title: str, body: str) -> bytes:
         }});
       }});
     }}
+    function initCustomerBulkActions() {{
+      const form = document.getElementById("bulk-hide-form");
+      const button = document.getElementById("bulk-hide-button");
+      const count = document.getElementById("bulk-hide-count");
+      const checks = Array.from(document.querySelectorAll("[data-customer-bulk-check]"));
+      if (!form || !button || !count || !checks.length) return;
+      function update() {{
+        const selected = checks.filter((check) => check.checked).length;
+        button.disabled = selected === 0;
+        count.textContent = selected ? `${{selected}} selected` : "None selected";
+      }}
+      checks.forEach((check) => check.addEventListener("change", update));
+      update();
+    }}
     function initTicketFilters() {{
       const table = document.querySelector("[data-ticket-table]");
       const search = document.getElementById("ticket-search");
@@ -1588,6 +1626,7 @@ def page(title: str, body: str) -> bytes:
       document.querySelectorAll(".health-select").forEach(setHealthSelectClass);
       initSortableTables();
       initCustomerSearch();
+      initCustomerBulkActions();
       initTicketFilters();
     }});
   </script>
@@ -1626,7 +1665,13 @@ def render_sidebar(active_slug: str = "") -> str:
                 <form method="post" action="/customers/{esc(customer['slug'])}/move-down"><button class="icon-button" type="submit" title="Move down">v</button></form>
                 <form method="post" action="/customers/{esc(customer['slug'])}/hide"><button class="icon-button" type="submit" title="Move to hidden list">Hide</button></form>"""
         )
-        return f"""<div class="customer-row">
+        checkbox = "" if hidden else (
+            f"""<input class="customer-bulk-check" data-customer-bulk-check form="bulk-hide-form" """
+            f"""type="checkbox" name="customer_id" value="{customer['id']}" aria-label="Select {esc(customer['name'])}">"""
+        )
+        hidden_class = " hidden-customer-row" if hidden else ""
+        return f"""<div class="customer-row{hidden_class}">
+              {checkbox}
               <a class="customer-link{active}" href="/customers/{esc(customer["slug"])}">
                 {esc(customer["name"])}{pin_mark}<br><span class="muted">{esc(customer["status"])}</span>
               </a>
@@ -1652,6 +1697,11 @@ def render_sidebar(active_slug: str = "") -> str:
   <div class="sidebar-content">
     <h3>Customers</h3>
     <input id="customer-search" class="customer-search" type="search" placeholder="Search customers">
+    <form id="bulk-hide-form" class="customer-bulk-actions" method="post" action="/customers/bulk-hide">
+      <input type="hidden" name="return_to" value="{esc('/customers/' + active_slug if active_slug else '/')}">
+      <button id="bulk-hide-button" type="submit" disabled>Hide selected</button>
+      <span id="bulk-hide-count" class="customer-bulk-count">None selected</span>
+    </form>
     {''.join(visible_links) or '<p class="muted">No visible customers.</p>'}
     {hidden_group}
     <hr>
@@ -2466,6 +2516,25 @@ class Handler(BaseHTTPRequestHandler):
                     (slug, name, ts, ts),
                 )
                 self.redirect(f"/customers/{slug}")
+                return
+
+            if path == "/customers/bulk-hide":
+                selected_ids = []
+                for raw_id in getattr(self, "form_values", {}).get("customer_id", []):
+                    try:
+                        selected_ids.append(int(raw_id))
+                    except ValueError:
+                        continue
+                if selected_ids:
+                    placeholders = ",".join("?" for _ in selected_ids)
+                    conn.execute(
+                        f"update customers set is_hidden = 1, updated_at = ? where id in ({placeholders})",
+                        (ts, *selected_ids),
+                    )
+                return_to = data.get("return_to", "/")
+                if return_to != "/" and not return_to.startswith("/customers/"):
+                    return_to = "/"
+                self.redirect(return_to)
                 return
 
             parts = path.split("/")
