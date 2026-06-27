@@ -56,3 +56,19 @@ bounded; raw private source content must not be committed to git.
   environments, people, and next actions.
 - Import suggested timeline entries or notes only after review.
 - Keep source links back to the original Markdown note.
+
+## Proxmox
+
+- Proxmox should be a read-only infrastructure metadata source.
+- The connector should list clusters, nodes, VMs, containers, tags, status,
+  resource allocation, IP/MAC metadata where available, and notes/descriptions.
+- The connector should map VMs or containers to TAM Console customers and
+  environments.
+- Do not grant shell access to Proxmox hosts through TAM Console.
+- Do not allow lifecycle actions by default, including start, stop, reboot,
+  migrate, snapshot, clone, delete, console, storage writes, or configuration
+  changes.
+- Prefer a Proxmox API token with a minimal read-only role scoped to the needed
+  objects.
+- Future write actions, if ever needed, must be separate from inventory sync and
+  require explicit confirmation.

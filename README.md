@@ -125,3 +125,16 @@ Routine Jira refresh should use the Jira REST API for known linked ticket keys
 and organization-based discovery. AI/Claude should be reserved for bounded
 summaries and messy-source extraction from Slack, email, Confluence, BOMs, and
 meeting notes.
+
+## Agent Handoff
+
+For AI-assisted continuation, read these tracked project notes first:
+
+- `docs/agent-handoff.md`
+- `docs/decisions.md`
+- `docs/connector-roadmap.md`
+- `docs/backlog.md`
+
+These files are the shared handoff state for Codex, Claude, and future sessions.
+Do not commit real customer data, credentials, `data/`, `notes/`, exports, or
+runtime logs.
