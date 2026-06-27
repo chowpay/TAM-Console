@@ -2430,8 +2430,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     <section class="section">
       <h2>{esc(customer['name'])}</h2>
       <dl class="facts">
+        <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
-        <dt>Products</dt><dd>{esc(customer['products'])}</dd>
+        <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
       </dl>
     </section>
     <nav class="tabs">{tabs}</nav>
