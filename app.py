@@ -139,7 +139,7 @@ def help_label(label: str, help_text: str | None = None) -> str:
         return esc(label)
     return (
         f'<span class="label-with-help">{esc(label)}'
-        f'<span class="help-dot" tabindex="0" title="{esc(text)}" '
+        f'<span class="help-dot" tabindex="0" data-help="{esc(text)}" '
         f'aria-label="{esc(label)} help: {esc(text)}">?</span></span>'
     )
 
@@ -1199,6 +1199,7 @@ def page(title: str, body: str) -> bytes:
       color: inherit;
     }}
     .help-dot {{
+      position: relative;
       display: inline-grid;
       place-items: center;
       width: 15px;
@@ -1213,11 +1214,55 @@ def page(title: str, body: str) -> bytes:
       cursor: help;
       flex: 0 0 auto;
     }}
+    .help-dot::after {{
+      content: attr(data-help);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      transform: translateX(-50%);
+      display: none;
+      width: max-content;
+      max-width: 280px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--input);
+      color: var(--ink);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      text-align: left;
+      white-space: normal;
+      z-index: 20;
+      pointer-events: none;
+    }}
+    .help-dot::before {{
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 3px);
+      transform: translateX(-50%) rotate(45deg);
+      display: none;
+      width: 8px;
+      height: 8px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--input);
+      z-index: 21;
+      pointer-events: none;
+    }}
     .help-dot:hover,
     .help-dot:focus {{
       color: var(--ink);
       border-color: var(--accent);
       outline: none;
+    }}
+    .help-dot:hover::after,
+    .help-dot:hover::before,
+    .help-dot:focus::after,
+    .help-dot:focus::before {{
+      display: block;
     }}
     .panel-grid {{ display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 16px; }}
     .health-pill {{
