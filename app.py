@@ -115,6 +115,19 @@ def health_badge(value: str) -> str:
     return f'<span class="health-pill health-{key}"><span class="health-dot"></span>{esc(health)}</span>'
 
 
+def editable_health_badge(slug: str, value: str) -> str:
+    options = []
+    for option in ("Unknown", "Green", "Yellow", "Red"):
+        chosen = " selected" if option.lower() == (value or "").lower() else ""
+        options.append(f'<option value="{esc(option)}"{chosen}>{esc(option)}</option>')
+    return f"""<form class="health-picker" method="post" action="/customers/{esc(slug)}/health">
+      {health_badge(value)}
+      <select name="health" aria-label="Change customer health" onchange="this.form.submit()">
+        {''.join(options)}
+      </select>
+    </form>"""
+
+
 DASHBOARD_HELP = {
     "Customers": "Customer accounts currently tracked in TAM Console.",
     "Tickets": "Distinct Jira ticket keys imported across all customers.",
@@ -1294,6 +1307,24 @@ def page(title: str, body: str) -> bytes:
     .health-select.health-yellow {{ border-left-color: #ffd166; }}
     .health-select.health-red {{ border-left-color: #ff7a7a; }}
     .health-select.health-unknown {{ border-left-color: var(--muted); }}
+    .health-picker {{
+      position: relative;
+      display: inline-block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }}
+    .health-picker .health-pill {{
+      cursor: pointer;
+    }}
+    .health-picker select {{
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+    }}
     .gap-list {{ display: grid; gap: 8px; }}
     .gap-item {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }}
     .empty {{ color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; }}
@@ -2129,7 +2160,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <h3>Overview</h3>
       <p>{esc(customer['overview'])}</p>
       <dl class="facts">
-        <dt>Health</dt><dd>{health_badge(customer['health'])}</dd>
+        <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
         <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
@@ -2474,6 +2505,15 @@ class Handler(BaseHTTPRequestHandler):
                         cid,
                     ),
                 )
+            elif action == "health":
+                health = data.get("health", "Unknown")
+                if normalize_match(health) not in {"unknown", "green", "yellow", "red"}:
+                    health = "Unknown"
+                conn.execute(
+                    "update customers set health = ?, updated_at = ? where id = ?",
+                    (health, ts, cid),
+                )
+                redirect_section = "overview"
             elif action == "pin":
                 current = conn.execute(
                     "select is_pinned, sort_order from customers where id = ?",
@@ -2837,6 +2877,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
         redirect_section = {
             "profile": "overview",
+            "health": "overview",
             "environments": "environments",
             "environment-update": "environments",
             "tickets": "tickets",
