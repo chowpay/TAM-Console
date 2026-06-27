@@ -107,6 +107,14 @@ def render_tags(value: str) -> str:
     return " ".join(f'<span class="tag">{esc(tag)}</span>' for tag in tags) or '<span class="muted">Not set</span>'
 
 
+def health_badge(value: str) -> str:
+    health = (value or "Unknown").strip() or "Unknown"
+    key = normalize_match(health) or "unknown"
+    if key not in {"green", "yellow", "red", "unknown"}:
+        key = "unknown"
+    return f'<span class="health-pill health-{key}">{esc(health)}</span>'
+
+
 def extract_ticket_keys(value: str) -> list[str]:
     seen = set()
     keys = []
@@ -171,6 +179,11 @@ def init_db() -> None:
               products text default '',
               overview text default '',
               architecture text default '',
+              health text default 'Unknown',
+              risk_reason text default '',
+              next_action text default '',
+              next_action_due text default '',
+              last_touch text default '',
               is_pinned integer default 0,
               sort_order integer default 0,
               created_at text not null,
@@ -391,6 +404,15 @@ def init_db() -> None:
             conn.execute("alter table customers add column is_pinned integer default 0")
         if "sort_order" not in customer_cols:
             conn.execute("alter table customers add column sort_order integer default 0")
+        for column, definition in (
+            ("health", "text default 'Unknown'"),
+            ("risk_reason", "text default ''"),
+            ("next_action", "text default ''"),
+            ("next_action_due", "text default ''"),
+            ("last_touch", "text default ''"),
+        ):
+            if column not in customer_cols:
+                conn.execute(f"alter table customers add column {column} {definition}")
 
 
 def rows(query: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -1117,6 +1139,20 @@ def page(title: str, body: str) -> bytes:
     .metric strong {{ display: block; font-size: 26px; line-height: 1.1; }}
     .metric span {{ color: var(--muted); font-size: 13px; }}
     .panel-grid {{ display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 16px; }}
+    .health-pill {{
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+    }}
+    .health-green {{ color: #62d26f; }}
+    .health-yellow {{ color: #ffd166; }}
+    .health-red {{ color: #ff7a7a; }}
+    .health-unknown {{ color: var(--muted); }}
+    .gap-list {{ display: grid; gap: 8px; }}
+    .gap-item {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }}
     .empty {{ color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; }}
     .table-scroll {{ width: 100%; overflow-x: auto; }}
     .table-scroll table {{ min-width: 1180px; }}
@@ -1437,6 +1473,65 @@ def render_home(message: str = "") -> bytes:
     )["n"]
     ticket_link_count = row("select count(*) as n from tickets")["n"]
     org_count = row("select count(distinct organization_id) as n from customer_jira_organizations where organization_id != ''")["n"]
+    red_count = row("select count(*) as n from customers where lower(health) = 'red'")["n"]
+    yellow_count = row("select count(*) as n from customers where lower(health) = 'yellow'")["n"]
+    quality_gaps = [
+        (
+            "No environments",
+            row(
+                """
+                select count(*) as n from customers c
+                where not exists (select 1 from environments e where e.customer_id = c.id)
+                """
+            )["n"],
+        ),
+        (
+            "Tickets without environment",
+            row("select count(*) as n from tickets where environment_id is null")["n"],
+        ),
+        (
+            "Staff without environment",
+            row(
+                """
+                select count(*) as n from staff s
+                where not exists (select 1 from environment_staff es where es.staff_id = s.id)
+                """
+            )["n"],
+        ),
+        (
+            "Imported customers",
+            row("select count(*) as n from customers where lower(status) = 'imported'")["n"],
+        ),
+        (
+            "No next action",
+            row("select count(*) as n from customers where coalesce(next_action, '') = ''")["n"],
+        ),
+    ]
+    gap_items = "".join(
+        f"""<div class="gap-item"><span>{esc(label)}</span><strong>{count_value}</strong></div>"""
+        for label, count_value in quality_gaps
+    )
+    risk_rows = "".join(
+        f"""<tr>
+          <td><a href="/customers/{esc(r['slug'])}">{esc(r['name'])}</a></td>
+          <td>{health_badge(r['health'])}</td>
+          <td>{esc(r['next_action']) or '<span class="muted">No next action</span>'}</td>
+          <td>{esc(r['next_action_due'])}</td>
+        </tr>"""
+        for r in rows(
+            """
+            select slug, name, health, next_action, next_action_due
+            from customers
+            where lower(health) in ('red', 'yellow')
+               or coalesce(next_action, '') != ''
+            order by case lower(health) when 'red' then 0 when 'yellow' then 1 else 2 end,
+                     next_action_due = '',
+                     next_action_due,
+                     name
+            limit 12
+            """
+        )
+    )
     recent_ticket_rows = "".join(
         f"""<tr>
           <td><a href="/customers/{esc(r['slug'])}/tickets">{esc(r['customer_name'])}</a></td>
@@ -1489,6 +1584,13 @@ def render_home(message: str = "") -> bytes:
         <div class="metric"><strong>{ticket_link_count}</strong><span>Ticket links</span></div>
         <div class="metric"><strong>{org_count}</strong><span>Jira orgs</span></div>
       </div>
+      <div class="dashboard-grid" style="margin-top:12px">
+        <div class="metric"><strong>{red_count}</strong><span>Red customers</span></div>
+        <div class="metric"><strong>{yellow_count}</strong><span>Yellow customers</span></div>
+        <div class="metric"><strong>{quality_gaps[0][1]}</strong><span>No environments</span></div>
+        <div class="metric"><strong>{quality_gaps[1][1]}</strong><span>Tickets missing env</span></div>
+        <div class="metric"><strong>{quality_gaps[2][1]}</strong><span>Staff missing env</span></div>
+      </div>
       <div class="actions">
         <form method="post" action="/jira/import-assigned">
           <button type="submit">Import my assigned Jira tickets</button>
@@ -1503,6 +1605,16 @@ def render_home(message: str = "") -> bytes:
       <section class="section">
         <h3>Customers With Active Work</h3>
         {f'<table><thead><tr><th>Customer</th><th>Active</th><th>Total</th></tr></thead><tbody>{active_customer_rows}</tbody></table>' if active_customer_rows else '<div class="empty">No active ticket data yet.</div>'}
+      </section>
+    </div>
+    <div class="panel-grid">
+      <section class="section">
+        <h3>Risk And Next Actions</h3>
+        {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Health</th><th>Next action</th><th>Due</th></tr></thead><tbody>{risk_rows}</tbody></table></div>' if risk_rows else '<div class="empty">No risk or next-action data yet.</div>'}
+      </section>
+      <section class="section">
+        <h3>Data Quality</h3>
+        <div class="gap-list">{gap_items}</div>
       </section>
     </div>
   </div>
@@ -1624,6 +1736,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         if selected and selected not in customer_status_options:
             options.append(f'<option value="{esc(selected)}" selected>{esc(selected)}</option>')
         return f'<select name="status">{"".join(options)}</select>'
+    def health_select(selected: str = "") -> str:
+        options = []
+        for option in ("Unknown", "Green", "Yellow", "Red"):
+            chosen = " selected" if option.lower() == (selected or "").lower() else ""
+            options.append(f'<option value="{esc(option)}"{chosen}>{esc(option)}</option>')
+        return f'<select name="health">{"".join(options)}</select>'
     def env_type_select(name: str, selected: str = "") -> str:
         options = ['<option value="">Unspecified</option>']
         for option in env_type_options:
@@ -1833,7 +1951,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <h3>Overview</h3>
       <p>{esc(customer['overview'])}</p>
       <dl class="facts">
+        <dt>Health</dt><dd>{health_badge(customer['health'])}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
+        <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Last touch</dt><dd>{esc(customer['last_touch']) or '<span class="muted">Not set</span>'}</dd>
+        <dt>Risk reason</dt><dd>{esc(customer['risk_reason']) or '<span class="muted">None</span>'}</dd>
         <dt>Aliases</dt><dd>{esc(customer['aliases'])}</dd>
         <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Region</dt><dd>{esc(customer['region']) or '<span class="muted">Not set</span>'}</dd>
@@ -1847,9 +1970,14 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <label>Owner<input name="owner" value="{esc(customer['owner'])}"></label>
             <label>Region<input name="region" value="{esc(customer['region'])}"></label>
             <label>Status{customer_status_select(customer['status'])}</label>
+            <label>Health{health_select(customer['health'])}</label>
             <label>Products<input name="products" value="{esc(customer['products'])}"></label>
+            <label>Next action due<input name="next_action_due" value="{esc(customer['next_action_due'])}" placeholder="YYYY-MM-DD"></label>
+            <label>Last touch<input name="last_touch" value="{esc(customer['last_touch'])}" placeholder="YYYY-MM-DD"></label>
           </div>
           <label>Aliases<input name="aliases" value="{esc(customer['aliases'])}"></label>
+          <label>Next action<textarea name="next_action">{esc(customer['next_action'])}</textarea></label>
+          <label>Risk reason<textarea name="risk_reason">{esc(customer['risk_reason'])}</textarea></label>
           <label>Overview<textarea name="overview">{esc(customer['overview'])}</textarea></label>
           <label>Architecture<textarea name="architecture">{esc(customer['architecture'])}</textarea></label>
           <button type="submit">Save profile</button>
@@ -1886,9 +2014,14 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <label>Owner<input name="owner" value="{esc(customer['owner'])}"></label>
               <label>Region<input name="region" value="{esc(customer['region'])}"></label>
               <label>Status{customer_status_select(customer['status'])}</label>
+              <label>Health{health_select(customer['health'])}</label>
               <label>Products<input name="products" value="{esc(customer['products'])}"></label>
+              <label>Next action due<input name="next_action_due" value="{esc(customer['next_action_due'])}" placeholder="YYYY-MM-DD"></label>
+              <label>Last touch<input name="last_touch" value="{esc(customer['last_touch'])}" placeholder="YYYY-MM-DD"></label>
             </div>
             <label>Aliases<input name="aliases" value="{esc(customer['aliases'])}"></label>
+            <label>Next action<textarea name="next_action">{esc(customer['next_action'])}</textarea></label>
+            <label>Risk reason<textarea name="risk_reason">{esc(customer['risk_reason'])}</textarea></label>
             <label>Overview<textarea name="overview">{esc(customer['overview'])}</textarea></label>
             <label>Architecture<textarea name="architecture">{esc(customer['architecture'])}</textarea></label>
             <button type="submit">Save profile</button>
@@ -2142,7 +2275,8 @@ class Handler(BaseHTTPRequestHandler):
                     """
                     update customers
                     set aliases = ?, status = ?, owner = ?, region = ?, products = ?,
-                        overview = ?, architecture = ?, updated_at = ?
+                        overview = ?, architecture = ?, health = ?, risk_reason = ?,
+                        next_action = ?, next_action_due = ?, last_touch = ?, updated_at = ?
                     where id = ?
                     """,
                     (
@@ -2153,6 +2287,11 @@ class Handler(BaseHTTPRequestHandler):
                         data.get("products", ""),
                         data.get("overview", ""),
                         data.get("architecture", ""),
+                        data.get("health", "Unknown"),
+                        data.get("risk_reason", ""),
+                        data.get("next_action", ""),
+                        data.get("next_action_due", ""),
+                        data.get("last_touch", ""),
                         ts,
                         cid,
                     ),
@@ -2510,7 +2649,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(page("Bad request", "<section class='section'><h2>Bad action</h2></section>"), 400)
                 return
         redirect_section = {
-            "profile": "architecture",
+            "profile": "overview",
             "environments": "environments",
             "environment-update": "environments",
             "tickets": "tickets",
