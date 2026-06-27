@@ -30,8 +30,24 @@ bounded; raw private source content must not be committed to git.
 - Default email access should be read-only.
 - Use email context for meeting outcomes, commitments, deployment details, BOM
   hints, and follow-up reminders.
-- Future write support should be limited to explicit drafts or reminders and
-  require confirmation before sending.
+- Future write support should generate draft text only by default.
+- Customer email drafts should not include `To`, `Cc`, or `Bcc` recipients, so
+  they cannot be sent accidentally.
+- Real send actions should remain out of scope unless explicitly enabled later.
+- Track inbound customer requests from email and identify whether each request
+  has been answered.
+
+## Response Tracking
+
+- Add dashboard widgets for unanswered customer requests.
+- Sources should include inbound customer emails and Jira ticket comments.
+- Track request source, customer, related ticket or environment, request date,
+  current owner, response status, and last response date.
+- Surface stale items when no response has been found within a configurable
+  window.
+- Treat AI classification as a suggestion: it can identify likely unanswered
+  requests, but the operator should be able to mark items answered, ignored, or
+  not a request.
 
 ## Obsidian
 
