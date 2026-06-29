@@ -1108,13 +1108,48 @@ def page(title: str, body: str) -> bytes:
     .facts {{ display: grid; grid-template-columns: 150px 1fr; gap: 8px 14px; }}
     .facts dt {{ color: var(--muted); }}
     .facts dd {{ margin: 0; }}
-    table {{ width: 100%; border-collapse: collapse; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
     th, td {{ text-align: left; vertical-align: top; padding: 9px 8px; border-bottom: 1px solid var(--line); }}
-    th {{ color: var(--muted); font-weight: 600; font-size: 13px; }}
+    th {{
+      position: relative;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    td {{ overflow-wrap: anywhere; }}
     th.sortable {{ cursor: pointer; user-select: none; }}
     th.sortable::after {{ content: "^v"; margin-left: 6px; font-size: 11px; opacity: .55; }}
     th.sortable.sort-asc::after {{ content: "^"; opacity: .9; }}
     th.sortable.sort-desc::after {{ content: "v"; opacity: .9; }}
+    .column-resizer {{
+      position: absolute;
+      top: 0;
+      right: -3px;
+      width: 8px;
+      height: 100%;
+      cursor: col-resize;
+      touch-action: none;
+      z-index: 1;
+    }}
+    .column-resizer::after {{
+      content: "";
+      position: absolute;
+      top: 8px;
+      bottom: 8px;
+      left: 3px;
+      width: 1px;
+      background: transparent;
+    }}
+    th:hover .column-resizer::after,
+    .column-resizer:hover::after {{
+      background: var(--accent);
+    }}
+    body.resizing-column {{
+      cursor: col-resize;
+      user-select: none;
+    }}
     th:first-child, td:first-child {{ min-width: 96px; white-space: nowrap; }}
     .item {{ padding: 14px; }}
     .item + .item {{ margin-top: 10px; }}
@@ -1560,6 +1595,10 @@ def page(title: str, body: str) -> bytes:
           th.classList.add("sortable");
           th.title = "Sort";
           th.addEventListener("click", () => {{
+            if (th.dataset.resized === "1") {{
+              th.dataset.resized = "0";
+              return;
+            }}
             const current = th.classList.contains("sort-asc") ? "asc" : th.classList.contains("sort-desc") ? "desc" : "";
             const direction = current === "asc" ? "desc" : "asc";
             Array.from(table.tHead.rows[0].cells).forEach((cell) => cell.classList.remove("sort-asc", "sort-desc"));
@@ -1567,6 +1606,53 @@ def page(title: str, body: str) -> bytes:
             const rows = Array.from(tbody.rows);
             rows.sort((a, b) => compareCells(a.cells[index] || a, b.cells[index] || b, direction));
             rows.forEach((row) => tbody.appendChild(row));
+          }});
+        }});
+      }});
+    }}
+    function initResizableTables() {{
+      document.querySelectorAll("table").forEach((table, tableIndex) => {{
+        if (!table.tHead) return;
+        table.dataset.tableIndex = table.dataset.tableIndex || String(tableIndex);
+        Array.from(table.tHead.rows[0].cells).forEach((th, columnIndex) => {{
+          if (th.querySelector(".column-resizer")) return;
+          const resizer = document.createElement("span");
+          resizer.className = "column-resizer";
+          resizer.title = "Drag to resize column";
+          th.appendChild(resizer);
+          resizer.addEventListener("click", (event) => event.stopPropagation());
+          resizer.addEventListener("pointerdown", (event) => {{
+            event.preventDefault();
+            event.stopPropagation();
+            const startX = event.clientX;
+            const startWidth = th.getBoundingClientRect().width;
+            document.body.classList.add("resizing-column");
+            resizer.setPointerCapture(event.pointerId);
+            function onMove(moveEvent) {{
+              const nextWidth = Math.max(72, startWidth + moveEvent.clientX - startX);
+              th.style.width = `${{nextWidth}}px`;
+              th.style.minWidth = `${{nextWidth}}px`;
+              Array.from(table.tBodies).forEach((tbody) => {{
+                Array.from(tbody.rows).forEach((row) => {{
+                  const cell = row.cells[columnIndex];
+                  if (cell) {{
+                    cell.style.width = `${{nextWidth}}px`;
+                    cell.style.minWidth = `${{nextWidth}}px`;
+                  }}
+                }});
+              }});
+              th.dataset.resized = "1";
+            }}
+            function onUp(upEvent) {{
+              document.body.classList.remove("resizing-column");
+              resizer.releasePointerCapture(upEvent.pointerId);
+              resizer.removeEventListener("pointermove", onMove);
+              resizer.removeEventListener("pointerup", onUp);
+              resizer.removeEventListener("pointercancel", onUp);
+            }}
+            resizer.addEventListener("pointermove", onMove);
+            resizer.addEventListener("pointerup", onUp);
+            resizer.addEventListener("pointercancel", onUp);
           }});
         }});
       }});
@@ -1644,6 +1730,7 @@ def page(title: str, body: str) -> bytes:
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
       document.querySelectorAll(".health-select").forEach(setHealthSelectClass);
       initSortableTables();
+      initResizableTables();
       initCustomerSearch();
       initCustomerBulkActions();
       initTicketFilters();
