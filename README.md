@@ -14,6 +14,25 @@ cd TAM-Console
 python3 app.py
 ```
 
+To run it in the background and write logs to `data/server.log`:
+
+```bash
+cd /home/ubuntu/TAM-Console
+setsid -f python3 app.py >> data/server.log 2>&1
+```
+
+Check whether it is running:
+
+```bash
+ps -eo pid,args | grep 'python3 app.py' | grep -v grep
+```
+
+Watch logs:
+
+```bash
+tail -f /home/ubuntu/TAM-Console/data/server.log
+```
+
 Defaults:
 
 - host: `0.0.0.0`
