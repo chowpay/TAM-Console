@@ -568,6 +568,35 @@ def jira_search_issues(jql: str, max_results: int = 50) -> list[dict]:
     return data.get("issues", [])
 
 
+def chunks(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def jira_get_issues_by_keys(issue_keys: list[str]) -> list[dict]:
+    fields = ["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"]
+    issues = []
+    seen = set()
+    clean_keys = []
+    for raw_key in issue_keys:
+        key = str(raw_key or "").strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean_keys.append(key)
+    for key_batch in chunks(clean_keys, 80):
+        jql = "issuekey in (" + ", ".join(jql_string(key) for key in key_batch) + ")"
+        data = jira_request(
+            "/rest/api/3/search/jql",
+            {
+                "jql": jql,
+                "fields": fields,
+                "maxResults": len(key_batch),
+            },
+        )
+        issues.extend(data.get("issues", []))
+    return issues
+
+
 def adf_plain_text(value: object) -> str:
     parts = []
 
@@ -738,12 +767,17 @@ def sync_jira_ticket_keys(customer_id: int, keys: list[str], ts: str | None = No
         "errors": [],
     }
     items_for_current = []
-    for key in keys:
-        try:
-            issue = jira_get_issue(key)
-        except Exception as exc:
-            stats["errors"].append(str(exc))  # type: ignore[union-attr]
-            continue
+    clean_keys = [str(key or "").strip().upper() for key in keys if str(key or "").strip()]
+    try:
+        issues = jira_get_issues_by_keys(clean_keys)
+    except Exception as exc:
+        stats["errors"].append(str(exc))  # type: ignore[union-attr]
+        return stats
+    issues_by_key = {issue.get("key", "").upper(): issue for issue in issues if issue.get("key")}
+    missing_keys = sorted(set(clean_keys) - set(issues_by_key))
+    if missing_keys:
+        stats["errors"].append(f"missing from Jira: {', '.join(missing_keys[:10])}")  # type: ignore[union-attr]
+    for issue in issues:
         item = issue_to_ticket_item(issue)
         orgs = issue.get("fields", {}).get("customfield_10002") or []
         if not orgs:
