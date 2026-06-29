@@ -161,6 +161,10 @@ def metric_card(value: object, label: str, help_text: str | None = None) -> str:
     return f'<div class="metric"><strong>{esc(value)}</strong><span class="metric-label">{help_label(label, help_text)}</span></div>'
 
 
+def search_terms(query: str) -> list[str]:
+    return [term for term in re.findall(r"[A-Za-z0-9_-]+", query.lower()) if term]
+
+
 def extract_ticket_keys(value: str) -> list[str]:
     seen = set()
     keys = []
@@ -992,6 +996,21 @@ def page(title: str, body: str) -> bytes:
       z-index: 2;
     }}
     header strong {{ font-size: 17px; }}
+    .header-actions {{ display: flex; align-items: center; gap: 10px; }}
+    .global-search {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }}
+    .global-search input {{
+      width: min(34vw, 420px);
+      min-width: 220px;
+      padding: 7px 9px;
+    }}
+    .global-search button {{ padding: 7px 10px; }}
     main {{ width: min(1920px, 100%); margin: 0 auto; padding: 24px 32px; }}
     .layout {{ display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 24px; }}
     :root[data-sidebar="collapsed"] .layout {{ grid-template-columns: 44px minmax(0, 1fr); }}
@@ -1632,7 +1651,13 @@ def page(title: str, body: str) -> bytes:
   </script>
   <header>
     <strong><a href="/">TAM Console</a></strong>
-    <button id="theme-toggle" class="theme-button" type="button" onclick="toggleTheme()">Light mode</button>
+    <div class="header-actions">
+      <form class="global-search" method="get" action="/search">
+        <input type="search" name="q" placeholder="Search customers or tickets">
+        <button type="submit">Search</button>
+      </form>
+      <button id="theme-toggle" class="theme-button" type="button" onclick="toggleTheme()">Light mode</button>
+    </div>
   </header>
   <main>{body}</main>
 </body>
@@ -1873,6 +1898,89 @@ def render_home(message: str = "") -> bytes:
   </div>
 </div>"""
     return page("Dashboard", body)
+
+
+def render_search(query: str = "") -> bytes:
+    terms = search_terms(query)
+    customer_results = []
+    ticket_results = []
+    if terms:
+        customer_where = " and ".join(
+            ["lower(c.name || ' ' || coalesce(c.aliases, '') || ' ' || coalesce(c.status, '') || ' ' || coalesce(c.products, '') || ' ' || coalesce(c.overview, '')) like ?"]
+            * len(terms)
+        )
+        customer_params = tuple(f"%{term}%" for term in terms)
+        customer_results = rows(
+            f"""
+            select c.slug, c.name, c.status, c.health, c.products, c.next_action
+            from customers c
+            where {customer_where}
+            order by c.is_pinned desc, c.name
+            limit 50
+            """,
+            customer_params,
+        )
+
+        ticket_where = " and ".join(
+            ["lower(c.name || ' ' || coalesce(c.aliases, '') || ' ' || t.key || ' ' || coalesce(t.summary, '') || ' ' || coalesce(t.notes, '') || ' ' || coalesce(t.status, '') || ' ' || coalesce(t.assignee, '')) like ?"]
+            * len(terms)
+        )
+        ticket_params = tuple(f"%{term}%" for term in terms)
+        ticket_results = rows(
+            f"""
+            select c.slug, c.name as customer_name, t.key, t.summary, t.status, t.updated, t.url, t.notes
+            from tickets t
+            join customers c on c.id = t.customer_id
+            where {ticket_where}
+            order by t.updated desc, c.name, t.key
+            limit 100
+            """,
+            ticket_params,
+        )
+
+    customer_rows = "".join(
+        f"""<tr>
+          <td><a href="/customers/{esc(r['slug'])}">{esc(r['name'])}</a></td>
+          <td>{health_badge(r['health'])}</td>
+          <td>{esc(r['status'])}</td>
+          <td>{esc(r['products'])}</td>
+          <td>{esc(r['next_action'])}</td>
+        </tr>"""
+        for r in customer_results
+    )
+    ticket_rows = "".join(
+        f"""<tr>
+          <td><a href="/customers/{esc(r['slug'])}/tickets">{esc(r['customer_name'])}</a></td>
+          <td><a href="{esc(r['url'])}" target="_blank">{esc(r['key'])}</a></td>
+          <td>{esc(r['summary'])}</td>
+          <td>{esc(r['status'])}</td>
+          <td>{esc(r['updated'])}</td>
+          <td>{esc(r['notes'])}</td>
+        </tr>"""
+        for r in ticket_results
+    )
+    body = f"""<div class="layout">
+  {render_sidebar()}
+  <div class="stack">
+    <section class="section">
+      <h2>Search</h2>
+      <form class="filterbar" method="get" action="/search">
+        <input type="search" name="q" value="{esc(query)}" placeholder="Search customers, tickets, SCTE, FR, ESD-8143">
+        <button type="submit">Search</button>
+      </form>
+      <p class="muted">{len(customer_results)} customer result(s), {len(ticket_results)} ticket result(s)</p>
+    </section>
+    <section class="section">
+      <h3>Customers</h3>
+      {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Health</th><th>Status</th><th>Products</th><th>Next action</th></tr></thead><tbody>{customer_rows}</tbody></table></div>' if customer_rows else '<div class="empty">No customer matches.</div>'}
+    </section>
+    <section class="section">
+      <h3>Tickets</h3>
+      {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Key</th><th>Summary</th><th>Status</th><th>Updated</th><th>Short summary</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if ticket_rows else '<div class="empty">No ticket matches.</div>'}
+    </section>
+  </div>
+</div>"""
+    return page("Search", body)
 
 
 def render_customer(slug: str, section: str = "overview", message: str = "") -> bytes:
@@ -2486,6 +2594,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             self.send_html(render_home())
+            return
+        if path == "/search":
+            params = parse_qs(parsed.query)
+            self.send_html(render_search(params.get("q", [""])[0]))
             return
         if path.startswith("/customers/"):
             parts = path.split("/")
