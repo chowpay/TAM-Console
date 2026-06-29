@@ -1218,6 +1218,10 @@ def page(title: str, body: str) -> bytes:
       font-weight: 650;
       cursor: pointer;
     }}
+    button.is-working {{
+      opacity: .75;
+      cursor: wait;
+    }}
     .actions {{
       display: flex;
       flex-wrap: wrap;
@@ -1797,6 +1801,18 @@ def page(title: str, body: str) -> bytes:
       ["health-green", "health-yellow", "health-red", "health-unknown"].forEach((name) => select.classList.remove(name));
       select.classList.add(["green", "yellow", "red"].includes(key) ? `health-${{key}}` : "health-unknown");
     }}
+    function initSubmitBusyState() {{
+      document.querySelectorAll("form").forEach((form) => {{
+        form.addEventListener("submit", () => {{
+          const button = form.querySelector("button[type='submit']");
+          if (!button || button.disabled) return;
+          button.dataset.originalText = button.textContent || "";
+          button.textContent = button.dataset.busyText || "Working...";
+          button.classList.add("is-working");
+          button.disabled = true;
+        }});
+      }});
+    }}
     window.addEventListener("DOMContentLoaded", () => {{
       document.querySelectorAll(".tag-editor").forEach(initTagEditor);
       document.querySelectorAll(".health-select").forEach(setHealthSelectClass);
@@ -1804,6 +1820,7 @@ def page(title: str, body: str) -> bytes:
       initResizableTables();
       initCustomerSearch();
       initCustomerBulkActions();
+      initSubmitBusyState();
       initTicketFilters();
     }});
   </script>
@@ -2029,7 +2046,7 @@ def render_home(message: str = "") -> bytes:
       </div>
       <div class="actions">
         <form method="post" action="/jira/sync">
-          <button type="submit">Sync Jira</button>
+          <button type="submit" data-busy-text="Syncing Jira...">Sync Jira</button>
         </form>
       </div>
     </section>
@@ -2771,9 +2788,12 @@ class Handler(BaseHTTPRequestHandler):
         ts = now_utc()
         if path in ("/jira/import-assigned", "/jira/sync"):
             try:
+                sys.stderr.write(f"{now_utc()} starting {path}\n")
                 message = sync_jira() if path == "/jira/sync" else import_assigned_jira_tickets()
+                sys.stderr.write(f"{now_utc()} finished {path}: {message}\n")
             except Exception as exc:
                 message = f"Jira sync failed: {exc}"
+                sys.stderr.write(f"{now_utc()} failed {path}: {exc}\n")
             self.send_html(render_home(message))
             return
         with db() as conn:
