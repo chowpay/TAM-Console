@@ -1256,6 +1256,41 @@ def page(title: str, body: str) -> bytes:
       opacity: .75;
       cursor: wait;
     }}
+    .status-panel {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 0;
+    }}
+    .status-panel summary {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--panel-2);
+      padding: 10px 12px;
+    }}
+    .status-panel p {{
+      margin: 0;
+      padding: 12px;
+      color: var(--muted);
+    }}
+    .status-panel-actions {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }}
+    .status-panel-actions button {{
+      padding: 5px 8px;
+      font-size: 12px;
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }}
+    .running-panel {{ display: none; }}
+    .running-panel.visible {{ display: block; }}
     .actions {{
       display: flex;
       flex-wrap: wrap;
@@ -1844,6 +1879,16 @@ def page(title: str, body: str) -> bytes:
           button.textContent = button.dataset.busyText || "Working...";
           button.classList.add("is-working");
           button.disabled = true;
+          const panelId = form.dataset.runningPanel;
+          if (panelId) {{
+            const panel = document.getElementById(panelId);
+            if (panel) {{
+              panel.classList.add("visible");
+              const started = panel.querySelector("[data-started-at]");
+              if (started) started.textContent = new Date().toLocaleTimeString();
+              panel.scrollIntoView({{ block: "nearest" }});
+            }}
+          }}
         }});
       }});
     }}
@@ -2061,7 +2106,14 @@ def render_home(message: str = "") -> bytes:
     body = f"""<div class="layout">
   {render_sidebar()}
   <div class="stack">
-    {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
+    <details id="jira-sync-running" class="status-panel running-panel" open>
+      <summary><strong>Syncing Jira</strong><span class="muted">Started <span data-started-at>now</span></span></summary>
+      <p>Importing assigned tickets and refreshing existing local ticket links. You can leave this open while it runs; the dashboard will return when the sync finishes.</p>
+    </details>
+    {f'''<details id="dashboard-status" class="status-panel" open>
+      <summary><strong>Last dashboard action</strong><span class="status-panel-actions"><button type="button" onclick="document.getElementById('dashboard-status').remove()">Dismiss</button></span></summary>
+      <p>{esc(message)}</p>
+    </details>''' if message else ''}
     <section class="section">
       <h2>Dashboard</h2>
       <div class="dashboard-grid">
@@ -2079,7 +2131,7 @@ def render_home(message: str = "") -> bytes:
         {metric_card(quality_gaps[2][1], "Staff missing env")}
       </div>
       <div class="actions">
-        <form method="post" action="/jira/sync">
+        <form method="post" action="/jira/sync" data-running-panel="jira-sync-running">
           <button type="submit" data-busy-text="Syncing Jira...">Sync Jira</button>
         </form>
       </div>
