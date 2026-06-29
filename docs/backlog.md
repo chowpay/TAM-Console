@@ -8,6 +8,9 @@ Concrete future work for TAM Console.
   future connector signals.
 - Add a formal Staff import workflow instead of one-off scripts.
 - Tighten CS ticket discovery to reduce false positives from broad text search.
+- Add customer routing rules for acquisitions, renamed brands, and key people,
+  such as mapping some Paramount tickets to CBS Studios when requester/person or
+  customer-field context indicates CBS.
 - Add customer-visible counts for hidden customers and possibly hidden tickets
   or archived records.
 - Add edit/delete flows for manually entered records where missing.
@@ -58,6 +61,8 @@ Concrete future work for TAM Console.
 
 - `customer_signals`: normalized source signals from Jira, Slack, email,
   Obsidian, and manual notes.
+- `customer_routing_rules`: organization/person/text/environment rules that map
+  ambiguous Jira or connector records to the right customer.
 - `health_recommendations`: suggested health, evidence, confidence, and review
   state.
 - `response_items`: inbound requests and whether they have been addressed.

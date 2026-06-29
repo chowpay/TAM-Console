@@ -85,6 +85,11 @@ setsid -f python3 /home/ubuntu/TAM-Console/app.py >> /home/ubuntu/TAM-Console/da
 - Staff records support multiple environment mappings.
 - Jira import can import assigned tickets by Organization and reconcile moved
   ticket organization links.
+- Jira feature-request tickets may use `FR-*` browse links that resolve to
+  current `MB-*` keys.
+- Acquisition/brand routing is an open problem: CBS Studios may need selected
+  Paramount-organization tickets routed to CBS based on requester/person/text
+  context.
 - Local artifacts under approved roots can be linked and previewed.
 
 ## Data Boundaries

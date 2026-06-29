@@ -168,7 +168,7 @@ def search_terms(query: str) -> list[str]:
 def extract_ticket_keys(value: str) -> list[str]:
     seen = set()
     keys = []
-    for match in re.findall(r"\b(?:ESD|CS)-\d+\b", value or "", flags=re.I):
+    for match in re.findall(r"\b(?:ESD|CS|FR|MB)-\d+\b", value or "", flags=re.I):
         key = match.upper()
         if key not in seen:
             seen.add(key)
@@ -687,7 +687,7 @@ def discover_jira_tickets(customer_id: int) -> str:
             search_specs.append(
                 (
                     f'text {name}',
-                    f'project in (ESD, CS) AND text ~ {jql_string(name)} ORDER BY updated DESC',
+                    f'project in (ESD, CS, FR, MB) AND text ~ {jql_string(name)} ORDER BY updated DESC',
                 )
             )
     text_terms = []
@@ -704,7 +704,7 @@ def discover_jira_tickets(customer_id: int) -> str:
         search_specs.append(
             (
                 label,
-                f'project in (ESD, CS) AND text ~ {jql_string(term)} ORDER BY updated DESC',
+                f'project in (ESD, CS, FR, MB) AND text ~ {jql_string(term)} ORDER BY updated DESC',
             )
         )
         seen_terms.add(label)
@@ -877,7 +877,7 @@ def import_assigned_jira_tickets() -> str:
     before_tickets = row("select count(*) as n from tickets")["n"]
     before_customers = row("select count(*) as n from customers")["n"]
     before_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
-    jql = "assignee = currentUser() AND project in (ESD, CS) ORDER BY updated DESC"
+    jql = "assignee = currentUser() AND project in (ESD, CS, FR, MB) ORDER BY updated DESC"
     issues = []
     next_token = None
     while True:
@@ -2516,7 +2516,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <summary>Add ticket</summary>
             <form method="post" action="/customers/{esc(customer['slug'])}/tickets">
               <div class="grid-2">
-                <label>Ticket key<input name="key" required placeholder="ESD-9106 or CS-1234" pattern="^(ESD|CS)-[0-9]+$"></label>
+                <label>Ticket key<input name="key" required placeholder="ESD-9106, CS-1234, FR-898, or MB-9904" pattern="^(ESD|CS|FR|MB)-[0-9]+$"></label>
                 <label>URL<input name="url" placeholder="https://tag.atlassian.net/browse/..."></label>
                 <label>Environment<select name="environment_id">{environment_options}</select></label>
                 <label>Status<input name="status"></label>
@@ -2537,7 +2537,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit">Sync existing Jira tickets</button>
             </form>
           </div>
-          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
+          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button><button type="button" data-ticket-filter="fr">FR</button><button type="button" data-ticket-filter="mb">MB</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>

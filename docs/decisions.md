@@ -23,6 +23,11 @@ session context limits.
 - Customers can be pinned, manually ordered, hidden, and restored from a hidden
   group.
 - Customer status is separate from sidebar visibility.
+- Customers may need brand/acquisition/person routing. Example: a ticket may
+  have Jira Organization `Paramount`, but still belong operationally to CBS
+  Studios because of requester identity, customer field text, legacy brand, or
+  environment context.
+- Organization-only routing is not sufficient for merged or renamed customers.
 
 ## Health
 
@@ -38,10 +43,14 @@ session context limits.
 
 - Jira keys should remain clickable.
 - ESD and CS tickets are both supported.
+- FR/MB feature-request tickets are supported. Jira may resolve old `FR-*`
+  browse links to current `MB-*` issue keys.
 - Known ticket sync should use Jira REST API where possible.
 - AI can help discover or summarize messy cases, but direct API sync should own
   routine refresh.
 - Organization changes in Jira should reconcile local ticket/customer links.
+- Future Jira routing should support rules such as `Organization = Paramount`
+  plus requester/person/customer-field/environment terms maps to CBS Studios.
 
 ## Connectors
 
