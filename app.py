@@ -1611,9 +1611,45 @@ def page(title: str, body: str) -> bytes:
       }});
     }}
     function initResizableTables() {{
+      function tableStorageKey(table, index) {{
+        const headings = Array.from(table.tHead?.rows[0]?.cells || [])
+          .map((cell) => (cell.textContent || "").replace(/[\\^v?]/g, "").trim().toLowerCase())
+          .join("|");
+        return `tam-console-column-widths:${{location.pathname}}:${{index}}:${{headings}}`;
+      }}
+      function applyColumnWidth(table, columnIndex, width) {{
+        const nextWidth = Math.max(72, Number(width) || 72);
+        const th = table.tHead?.rows[0]?.cells[columnIndex];
+        if (th) {{
+          th.style.width = `${{nextWidth}}px`;
+          th.style.minWidth = `${{nextWidth}}px`;
+        }}
+        Array.from(table.tBodies).forEach((tbody) => {{
+          Array.from(tbody.rows).forEach((row) => {{
+            const cell = row.cells[columnIndex];
+            if (cell) {{
+              cell.style.width = `${{nextWidth}}px`;
+              cell.style.minWidth = `${{nextWidth}}px`;
+            }}
+          }});
+        }});
+      }}
+      function storedWidths(key) {{
+        try {{
+          const value = JSON.parse(localStorage.getItem(key) || "[]");
+          return Array.isArray(value) ? value : [];
+        }} catch {{
+          return [];
+        }}
+      }}
       document.querySelectorAll("table").forEach((table, tableIndex) => {{
         if (!table.tHead) return;
         table.dataset.tableIndex = table.dataset.tableIndex || String(tableIndex);
+        const storageKey = tableStorageKey(table, tableIndex);
+        const widths = storedWidths(storageKey);
+        widths.forEach((width, columnIndex) => {{
+          if (width) applyColumnWidth(table, columnIndex, width);
+        }});
         Array.from(table.tHead.rows[0].cells).forEach((th, columnIndex) => {{
           if (th.querySelector(".column-resizer")) return;
           const resizer = document.createElement("span");
@@ -1630,20 +1666,13 @@ def page(title: str, body: str) -> bytes:
             resizer.setPointerCapture(event.pointerId);
             function onMove(moveEvent) {{
               const nextWidth = Math.max(72, startWidth + moveEvent.clientX - startX);
-              th.style.width = `${{nextWidth}}px`;
-              th.style.minWidth = `${{nextWidth}}px`;
-              Array.from(table.tBodies).forEach((tbody) => {{
-                Array.from(tbody.rows).forEach((row) => {{
-                  const cell = row.cells[columnIndex];
-                  if (cell) {{
-                    cell.style.width = `${{nextWidth}}px`;
-                    cell.style.minWidth = `${{nextWidth}}px`;
-                  }}
-                }});
-              }});
+              applyColumnWidth(table, columnIndex, nextWidth);
               th.dataset.resized = "1";
             }}
             function onUp(upEvent) {{
+              const saved = storedWidths(storageKey);
+              saved[columnIndex] = Math.round(th.getBoundingClientRect().width);
+              localStorage.setItem(storageKey, JSON.stringify(saved));
               document.body.classList.remove("resizing-column");
               resizer.releasePointerCapture(upEvent.pointerId);
               resizer.removeEventListener("pointermove", onMove);
