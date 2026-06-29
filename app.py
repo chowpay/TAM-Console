@@ -728,35 +728,27 @@ def discover_jira_tickets(customer_id: int) -> str:
     return f"Discovered/imported {saved} Jira ticket(s)."
 
 
-def sync_jira_tickets(customer_id: int) -> str:
-    keys = [
-        r["key"]
-        for r in rows(
-            "select key from tickets where customer_id = ? order by key",
-            (customer_id,),
-        )
-        if r["key"]
-    ]
-    if not keys:
-        return "No linked Jira tickets to sync yet."
-
-    refreshed = 0
-    moved = 0
-    kept_without_org = 0
-    errors = []
-    ts = now_utc()
+def sync_jira_ticket_keys(customer_id: int, keys: list[str], ts: str | None = None) -> dict[str, int | list[str]]:
+    ts = ts or now_utc()
+    stats: dict[str, int | list[str]] = {
+        "total": 0,
+        "refreshed": 0,
+        "moved": 0,
+        "kept_without_org": 0,
+        "errors": [],
+    }
     items_for_current = []
     for key in keys:
         try:
             issue = jira_get_issue(key)
         except Exception as exc:
-            errors.append(str(exc))
+            stats["errors"].append(str(exc))  # type: ignore[union-attr]
             continue
         item = issue_to_ticket_item(issue)
         orgs = issue.get("fields", {}).get("customfield_10002") or []
         if not orgs:
             items_for_current.append(item)
-            kept_without_org += 1
+            stats["kept_without_org"] += 1  # type: ignore[operator]
             continue
         with db() as conn:
             target_customer_ids = set()
@@ -769,20 +761,37 @@ def sync_jira_tickets(customer_id: int) -> str:
                     "delete from tickets where customer_id = ? and key = ?",
                     (customer_id, key),
                 )
-                moved += 1
-            refreshed += 1
+                stats["moved"] += 1  # type: ignore[operator]
+            stats["refreshed"] += 1  # type: ignore[operator]
 
     synced = upsert_ticket_items(customer_id, items_for_current) if items_for_current else 0
-    total_synced = refreshed + synced
+    stats["total"] = int(stats["refreshed"]) + synced
+    return stats
+
+
+def sync_jira_tickets(customer_id: int) -> str:
+    keys = [
+        r["key"]
+        for r in rows(
+            "select key from tickets where customer_id = ? order by key",
+            (customer_id,),
+        )
+        if r["key"]
+    ]
+    if not keys:
+        return "No linked Jira tickets to sync yet."
+
+    stats = sync_jira_ticket_keys(customer_id, keys)
     details = []
-    if moved:
-        details.append(f"moved {moved}")
-    if kept_without_org:
-        details.append(f"kept {kept_without_org} without Jira Organization")
+    if stats["moved"]:
+        details.append(f"moved {stats['moved']}")
+    if stats["kept_without_org"]:
+        details.append(f"kept {stats['kept_without_org']} without Jira Organization")
+    errors = stats["errors"]
     if errors:
-        details.append(f"errors: {'; '.join(errors[:3])}")
+        details.append(f"errors: {'; '.join(errors[:3])}")  # type: ignore[index]
     suffix = f" ({'; '.join(details)})" if details else ""
-    return f"Synced {total_synced} Jira ticket(s) at {now_utc()}{suffix}."
+    return f"Synced {stats['total']} Jira ticket(s) at {now_utc()}{suffix}."
 
 
 def unique_customer_slug(conn: sqlite3.Connection, name: str) -> str:
@@ -920,6 +929,39 @@ def import_assigned_jira_tickets() -> str:
         f"{after_customers - before_customers} customer(s), and {after_orgs - before_orgs} org mapping(s). "
         f"Skipped {skipped_no_org} assigned ticket(s) with no Organization."
     )
+
+
+def sync_jira() -> str:
+    import_message = import_assigned_jira_tickets()
+    tickets_by_customer: dict[int, list[str]] = {}
+    for ticket in rows("select customer_id, key from tickets where key != '' order by customer_id, key"):
+        tickets_by_customer.setdefault(ticket["customer_id"], []).append(ticket["key"])
+
+    ts = now_utc()
+    totals = {
+        "total": 0,
+        "moved": 0,
+        "kept_without_org": 0,
+        "errors": [],
+    }
+    for customer_id, keys in tickets_by_customer.items():
+        stats = sync_jira_ticket_keys(customer_id, keys, ts)
+        totals["total"] += int(stats["total"])  # type: ignore[arg-type]
+        totals["moved"] += int(stats["moved"])  # type: ignore[arg-type]
+        totals["kept_without_org"] += int(stats["kept_without_org"])  # type: ignore[arg-type]
+        totals["errors"].extend(stats["errors"])  # type: ignore[union-attr,arg-type]
+
+    details = [
+        import_message,
+        f"Refreshed {totals['total']} existing local ticket link(s).",
+    ]
+    if totals["moved"]:
+        details.append(f"Moved {totals['moved']} ticket link(s) based on Jira Organizations.")
+    if totals["kept_without_org"]:
+        details.append(f"Kept {totals['kept_without_org']} ticket link(s) without Jira Organization.")
+    if totals["errors"]:
+        details.append(f"Errors: {'; '.join(totals['errors'][:3])}")  # type: ignore[index]
+    return " ".join(details)
 
 
 def render_artifact_item(artifact: sqlite3.Row) -> str:
@@ -1986,8 +2028,8 @@ def render_home(message: str = "") -> bytes:
         {metric_card(quality_gaps[2][1], "Staff missing env")}
       </div>
       <div class="actions">
-        <form method="post" action="/jira/import-assigned">
-          <button type="submit">Import my assigned Jira tickets</button>
+        <form method="post" action="/jira/sync">
+          <button type="submit">Sync Jira</button>
         </form>
       </div>
     </section>
@@ -2727,11 +2769,11 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         data = form_data(self)
         ts = now_utc()
-        if path == "/jira/import-assigned":
+        if path in ("/jira/import-assigned", "/jira/sync"):
             try:
-                message = import_assigned_jira_tickets()
+                message = sync_jira() if path == "/jira/sync" else import_assigned_jira_tickets()
             except Exception as exc:
-                message = f"Assigned Jira import failed: {exc}"
+                message = f"Jira sync failed: {exc}"
             self.send_html(render_home(message))
             return
         with db() as conn:
