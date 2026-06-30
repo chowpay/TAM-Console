@@ -1820,6 +1820,9 @@ def page(title: str, body: str) -> bytes:
       min-height: 28px;
     }}
     .tabs a.active {{ background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }}
+    .tabs a.danger {{ border-color: #d84a4a; color: #ff8b8b; }}
+    .tabs a.danger.active {{ background: #d84a4a; border-color: #d84a4a; color: #fff; }}
+    .dashboard-panel[hidden] {{ display: none; }}
     .dashboard-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }}
     .metric {{ padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }}
     .metric strong {{ display: block; font-size: 26px; line-height: 1.1; }}
@@ -2287,6 +2290,24 @@ def page(title: str, body: str) -> bytes:
       search.addEventListener("input", apply);
       apply();
     }}
+    function initDashboardTabs() {{
+      const tabs = Array.from(document.querySelectorAll("[data-dashboard-tab]"));
+      const panels = Array.from(document.querySelectorAll("[data-dashboard-panel]"));
+      if (!tabs.length || !panels.length) return;
+      function activate(name) {{
+        tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.dashboardTab === name));
+        panels.forEach((panel) => {{
+          panel.hidden = panel.dataset.dashboardPanel !== name;
+        }});
+      }}
+      tabs.forEach((tab) => {{
+        tab.addEventListener("click", (event) => {{
+          event.preventDefault();
+          activate(tab.dataset.dashboardTab || "dashboard");
+        }});
+      }});
+      activate(location.hash === "#dashboard-advisories" ? "advisories" : "dashboard");
+    }}
     function toggleStaffEdit(id) {{
       const panel = document.getElementById(id);
       if (panel) panel.classList.toggle("open");
@@ -2397,6 +2418,7 @@ def page(title: str, body: str) -> bytes:
       initUnmappedJiraMapping();
       initSubmitBusyState();
       initTicketFilters();
+      initDashboardTabs();
     }});
   </script>
   <header>
@@ -2660,9 +2682,10 @@ def render_home(message: str = "") -> bytes:
     <section class="section">
       <h2>Dashboard</h2>
       <nav class="tabs">
-        <a class="active" href="/">Dashboard</a>
-        <a href="#dashboard-advisories">Advisories</a>
+        <a class="active" href="/" data-dashboard-tab="dashboard">Dashboard</a>
+        <a class="danger" href="#dashboard-advisories" data-dashboard-tab="advisories">Advisories</a>
       </nav>
+      <div class="dashboard-panel" data-dashboard-panel="dashboard">
       <div class="dashboard-grid">
         {metric_card(count, "Customers")}
         {metric_card(ticket_count, "Tickets")}
@@ -2682,8 +2705,10 @@ def render_home(message: str = "") -> bytes:
           <button type="submit" data-busy-text="Syncing Jira...">Sync Jira</button>
         </form>
       </div>
+      </div>
     </section>
-    <div class="panel-grid">
+    <div class="dashboard-panel" data-dashboard-panel="dashboard">
+      <div class="panel-grid">
       <section class="section">
         <h3>Recent Tickets</h3>
         {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Key</th><th>Status</th><th>Updated</th></tr></thead><tbody>{recent_ticket_rows}</tbody></table></div>' if recent_ticket_rows else '<div class="empty">No tickets imported yet.</div>'}
@@ -2692,8 +2717,8 @@ def render_home(message: str = "") -> bytes:
         <h3>Customers With Active Work</h3>
         {f'<table><thead><tr><th>Customer</th><th>Active</th><th>Total</th></tr></thead><tbody>{active_customer_rows}</tbody></table>' if active_customer_rows else '<div class="empty">No active ticket data yet.</div>'}
       </section>
-    </div>
-    <div class="panel-grid">
+      </div>
+      <div class="panel-grid">
       <section class="section">
         <h3>Risk And Next Actions</h3>
         {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Health</th><th>Next action</th><th>Due</th></tr></thead><tbody>{risk_rows}</tbody></table></div>' if risk_rows else '<div class="empty">No risk or next-action data yet.</div>'}
@@ -2702,12 +2727,13 @@ def render_home(message: str = "") -> bytes:
         <h3>Data Quality</h3>
         <div class="gap-list">{gap_items}</div>
       </section>
-    </div>
-    <section id="unmapped-jira" class="section">
+      </div>
+      <section id="unmapped-jira" class="section">
       <h3>Unmapped Jira Tickets</h3>
       {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped#unmapped-jira"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Review suggestions, change any dropdown, then map selected tickets.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
-    </section>
-    <section id="dashboard-advisories" class="section">
+      </section>
+    </div>
+    <section id="dashboard-advisories" class="section dashboard-panel" data-dashboard-panel="advisories" hidden>
       <h3>Advisories</h3>
       <p class="muted">Track release notes, hotfixes, regressions, and Slack/email/ticket signals that should appear on relevant customer profiles.</p>
       {render_advisory_table()}
