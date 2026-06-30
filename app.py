@@ -322,6 +322,15 @@ def relevant_advisories_for_customer(customer_id: int) -> list[tuple[sqlite3.Row
     return matches
 
 
+def affected_customers_for_advisory(advisory: sqlite3.Row) -> list[tuple[sqlite3.Row, list[str]]]:
+    matches = []
+    for customer in rows("select id, slug, name from customers order by is_pinned desc, name"):
+        matched_terms = advisory_match_terms(advisory, customer_advisory_context(customer["id"]))
+        if matched_terms:
+            matches.append((customer, matched_terms))
+    return matches
+
+
 def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]]) -> str:
     return "".join(
         f"""<article class="item">
@@ -361,23 +370,25 @@ def advisory_rows() -> list[sqlite3.Row]:
 def render_advisory_table(advisories: list[sqlite3.Row] | None = None) -> str:
     advisories = advisory_rows() if advisories is None else advisories
     table_rows = "".join(
-        f"""<tr>
+        (
+            lambda affected: f"""<tr>
           <td>{esc(a['title'])}</td>
           <td>{esc(a['severity'])}</td>
           <td>{esc(a['product'])}</td>
           <td>{esc(a['affected_versions'])}</td>
           <td>{render_tags(a['relevance_terms'])}</td>
+          <td>{', '.join(f'<a href="/customers/{esc(customer["slug"])}">{esc(customer["name"])}</a>' for customer, _ in affected) or '<span class="muted">No matches</span>'}</td>
           <td>{f'<a href="https://tag.atlassian.net/browse/{esc(a["ticket_key"])}" target="_blank">{esc(a["ticket_key"])}</a>' if a['ticket_key'] else '<span class="muted">None</span>'}</td>
           <td>{esc(a['status'])}</td>
         </tr>"""
+        )(affected_customers_for_advisory(a))
         for a in advisories
     )
     return (
-        f'<div class="table-scroll"><table><thead><tr><th>Title</th><th>Severity</th><th>Product</th><th>Affected versions</th><th>Relevance terms</th><th>Ticket</th><th>Status</th></tr></thead><tbody>{table_rows}</tbody></table></div>'
+        f'<div class="table-scroll"><table><thead><tr><th>Title</th><th>Severity</th><th>Product</th><th>Affected versions</th><th>Relevance terms</th><th>Affected customers</th><th>Ticket</th><th>Status</th></tr></thead><tbody>{table_rows}</tbody></table></div>'
         if table_rows
         else '<div class="empty">No advisories yet.</div>'
     )
-
 
 def render_advisory_form() -> str:
     return f"""<form method="post" action="/advisories">
@@ -608,6 +619,12 @@ def init_db() -> None:
               updated_at text not null
             );
 
+            create table if not exists ui_preferences (
+              key text primary key,
+              value text not null,
+              updated_at text not null
+            );
+
             create table if not exists unmapped_jira_tickets (
               key text primary key,
               summary text default '',
@@ -753,6 +770,36 @@ def set_app_setting(conn: sqlite3.Connection, key: str, value: str, ts: str) -> 
     conn.execute(
         """
         insert into app_settings (key, value, updated_at)
+        values (?, ?, ?)
+        on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, ts),
+    )
+
+
+def table_width_preferences() -> dict[str, list[int]]:
+    prefs: dict[str, list[int]] = {}
+    for pref in rows("select key, value from ui_preferences where key like 'tam-console-column-widths:%'"):
+        try:
+            value = json.loads(pref["value"])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, list):
+            continue
+        widths = []
+        for width in value:
+            try:
+                widths.append(int(width) if width else 0)
+            except (TypeError, ValueError):
+                widths.append(0)
+        prefs[pref["key"]] = widths
+    return prefs
+
+
+def save_ui_preference(conn: sqlite3.Connection, key: str, value: str, ts: str) -> None:
+    conn.execute(
+        """
+        insert into ui_preferences (key, value, updated_at)
         values (?, ?, ?)
         on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at
         """,
@@ -2026,6 +2073,7 @@ def page(title: str, body: str) -> bytes:
     document.documentElement.dataset.theme = savedTheme;
     const savedSidebar = localStorage.getItem("tam-console-sidebar") || "collapsed";
     document.documentElement.dataset.sidebar = savedSidebar;
+    const serverTableWidths = {json.dumps(table_width_preferences())};
     function toggleTheme() {{
       const current = document.documentElement.dataset.theme || "dark";
       const next = current === "dark" ? "light" : "dark";
@@ -2155,6 +2203,7 @@ def page(title: str, body: str) -> bytes:
       }});
     }}
     function initResizableTables() {{
+      if (window.matchMedia("(max-width: 860px)").matches) return;
       function tableStorageKey(table, index) {{
         const headings = Array.from(table.tHead?.rows[0]?.cells || [])
           .map((cell) => (cell.textContent || "").replace(/[\\^v?]/g, "").trim().toLowerCase())
@@ -2179,12 +2228,22 @@ def page(title: str, body: str) -> bytes:
         }});
       }}
       function storedWidths(key) {{
+        if (Array.isArray(serverTableWidths[key])) return serverTableWidths[key];
         try {{
           const value = JSON.parse(localStorage.getItem(key) || "[]");
           return Array.isArray(value) ? value : [];
         }} catch {{
           return [];
         }}
+      }}
+      function saveWidths(key, widths) {{
+        serverTableWidths[key] = widths;
+        localStorage.setItem(key, JSON.stringify(widths));
+        fetch("/ui/table-widths", {{
+          method: "POST",
+          body: new URLSearchParams({{ key, widths: JSON.stringify(widths) }}),
+          headers: {{ "Accept": "application/json", "X-Requested-With": "fetch" }},
+        }}).catch(() => {{}});
       }}
       document.querySelectorAll("table").forEach((table, tableIndex) => {{
         if (!table.tHead) return;
@@ -2216,7 +2275,7 @@ def page(title: str, body: str) -> bytes:
             function onUp(upEvent) {{
               const saved = storedWidths(storageKey);
               saved[columnIndex] = Math.round(th.getBoundingClientRect().width);
-              localStorage.setItem(storageKey, JSON.stringify(saved));
+              saveWidths(storageKey, saved);
               document.body.classList.remove("resizing-column");
               resizer.releasePointerCapture(upEvent.pointerId);
               resizer.removeEventListener("pointermove", onMove);
@@ -3548,6 +3607,26 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
             self.redirect("/#dashboard-advisories")
+            return
+        if path == "/ui/table-widths":
+            key = data.get("key", "")
+            try:
+                raw_widths = json.loads(data.get("widths", "[]"))
+            except json.JSONDecodeError:
+                raw_widths = []
+            widths = []
+            if key.startswith("tam-console-column-widths:") and isinstance(raw_widths, list):
+                for width in raw_widths[:50]:
+                    try:
+                        widths.append(max(0, min(2000, int(width) if width else 0)))
+                    except (TypeError, ValueError):
+                        widths.append(0)
+            if not key.startswith("tam-console-column-widths:") or not widths:
+                self.send_json({"ok": False, "message": "Invalid table width preference."}, 400)
+                return
+            with db() as conn:
+                save_ui_preference(conn, key, json.dumps(widths), ts)
+            self.send_json({"ok": True, "key": key, "widths": widths})
             return
         if path == "/jira/map-unmapped":
             wants_json = (
