@@ -240,6 +240,106 @@ def suggest_customer_for_ticket(ticket: sqlite3.Row, candidates: list[dict]) -> 
     return best
 
 
+def advisory_match_terms(advisory: sqlite3.Row, context_text: str) -> list[str]:
+    lower_context = context_text.lower()
+    normalized_context = normalize_match(context_text)
+    matched = []
+    for term in parse_tags(advisory["relevance_terms"]):
+        term_lower = term.lower()
+        normalized = normalize_match(term)
+        if not normalized:
+            continue
+        if re.search(r"[^A-Za-z0-9\s_-]", term) and term_lower in lower_context:
+            matched.append(term)
+        elif len(normalized) >= 3 and normalized in normalized_context:
+            matched.append(term)
+    product = normalize_match(advisory["product"])
+    if not matched and not parse_tags(advisory["relevance_terms"]) and product and product in normalized_context:
+        matched.append(advisory["product"])
+    return matched
+
+
+def customer_advisory_context(customer_id: int) -> str:
+    customer = row("select * from customers where id = ?", (customer_id,))
+    if customer is None:
+        return ""
+    pieces = [
+        customer["name"],
+        customer["aliases"],
+        customer["products"],
+        customer["overview"],
+        customer["architecture"],
+    ]
+    for env in rows("select * from environments where customer_id = ?", (customer_id,)):
+        pieces.extend(
+            [
+                env["name"],
+                env["env_type"],
+                env["location"],
+                env["products"],
+                env["source_types"],
+                env["architecture"],
+                env["notes"],
+            ]
+        )
+    for software in rows("select * from software_deployments where customer_id = ?", (customer_id,)):
+        pieces.extend(
+            [
+                software["product"],
+                software["version"],
+                software["version_notes"],
+                software["deployment_mode"],
+                software["redundancy"],
+                software["node_count"],
+                software["notes"],
+            ]
+        )
+    return " ".join(str(piece or "") for piece in pieces)
+
+
+def relevant_advisories_for_customer(customer_id: int) -> list[tuple[sqlite3.Row, list[str]]]:
+    context = customer_advisory_context(customer_id)
+    matches = []
+    for advisory in rows(
+        """
+        select *
+        from advisories
+        where lower(status) = 'active'
+        order by case lower(severity)
+                   when 'critical' then 0
+                   when 'high' then 1
+                   when 'warning' then 2
+                   when 'info' then 3
+                   else 4
+                 end,
+                 updated_at desc,
+                 title
+        """
+    ):
+        matched_terms = advisory_match_terms(advisory, context)
+        if matched_terms:
+            matches.append((advisory, matched_terms))
+    return matches
+
+
+def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]]) -> str:
+    return "".join(
+        f"""<article class="item">
+          <span class="tag">{esc(advisory['severity'])}</span>
+          <strong>{esc(advisory['title'])}</strong>
+          <p>{esc(advisory['body'])}</p>
+          <dl class="facts">
+            <dt>Product</dt><dd>{esc(advisory['product']) or '<span class="muted">Any</span>'}</dd>
+            <dt>Affected versions</dt><dd>{esc(advisory['affected_versions']) or '<span class="muted">Not specified</span>'}</dd>
+            <dt>Matched</dt><dd>{render_tags(', '.join(matched_terms))}</dd>
+            <dt>Ticket</dt><dd>{f'<a href="https://tag.atlassian.net/browse/{esc(advisory["ticket_key"])}" target="_blank">{esc(advisory["ticket_key"])}</a>' if advisory['ticket_key'] else '<span class="muted">None</span>'}</dd>
+            <dt>Source</dt><dd>{f'<a href="{esc(advisory["source_url"])}" target="_blank">source</a>' if advisory['source_url'] else '<span class="muted">Manual</span>'}</dd>
+          </dl>
+        </article>"""
+        for advisory, matched_terms in advisory_matches
+    )
+
+
 def render_tag_editor(name: str, value: str = "", placeholder: str = "") -> str:
     return f"""<div class="tag-editor" data-tags="{esc(tags_csv(value))}">
       <div class="tag-editor-tags"></div>
@@ -465,6 +565,21 @@ def init_db() -> None:
               source text default '',
               synced_at text not null,
               created_at text not null
+            );
+
+            create table if not exists advisories (
+              id integer primary key,
+              title text not null,
+              severity text default 'Info',
+              product text default '',
+              affected_versions text default '',
+              relevance_terms text default '',
+              body text default '',
+              ticket_key text default '',
+              source_url text default '',
+              status text default 'Active',
+              created_at text not null,
+              updated_at text not null
             );
             """
         )
@@ -2235,6 +2350,7 @@ def page(title: str, body: str) -> bytes:
         <input type="search" name="q" placeholder="Search customers or tickets">
         <button type="submit">Search</button>
       </form>
+      <a href="/advisories">Advisories</a>
       <a href="/settings">Settings</a>
       <button id="theme-toggle" class="theme-button" type="button" onclick="toggleTheme()">Light mode</button>
     </div>
@@ -2652,6 +2768,64 @@ def render_settings(message: str = "") -> bytes:
     return page("Settings", body)
 
 
+def render_advisories(message: str = "") -> bytes:
+    advisory_rows = "".join(
+        f"""<tr>
+          <td>{esc(a['title'])}</td>
+          <td>{esc(a['severity'])}</td>
+          <td>{esc(a['product'])}</td>
+          <td>{esc(a['affected_versions'])}</td>
+          <td>{render_tags(a['relevance_terms'])}</td>
+          <td>{f'<a href="https://tag.atlassian.net/browse/{esc(a["ticket_key"])}" target="_blank">{esc(a["ticket_key"])}</a>' if a['ticket_key'] else '<span class="muted">None</span>'}</td>
+          <td>{esc(a['status'])}</td>
+        </tr>"""
+        for a in rows(
+            """
+            select *
+            from advisories
+            order by case lower(severity)
+                       when 'critical' then 0
+                       when 'high' then 1
+                       when 'warning' then 2
+                       when 'info' then 3
+                       else 4
+                     end,
+                     updated_at desc,
+                     title
+            """
+        )
+    )
+    body = f"""<div class="layout">
+  {render_sidebar()}
+  <div class="stack">
+    {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
+    <section class="section">
+      <h2>Advisories</h2>
+      <p class="muted">Track release notes, hotfixes, regressions, and Slack/email/ticket signals that should appear on relevant customer profiles.</p>
+      {f'<div class="table-scroll"><table><thead><tr><th>Title</th><th>Severity</th><th>Product</th><th>Affected versions</th><th>Relevance terms</th><th>Ticket</th><th>Status</th></tr></thead><tbody>{advisory_rows}</tbody></table></div>' if advisory_rows else '<div class="empty">No advisories yet.</div>'}
+    </section>
+    <section class="section">
+      <h3>Add Advisory</h3>
+      <form method="post" action="/advisories">
+        <div class="grid-2">
+          <label>Title<input name="title" required placeholder="MCS 1.8.4 hotfix for 1+1 deployments"></label>
+          <label>Severity<select name="severity"><option>Info</option><option>Warning</option><option>High</option><option>Critical</option></select></label>
+          <label>Product<input name="product" placeholder="MCS"></label>
+          <label>Affected versions<input name="affected_versions" placeholder="1.8.x"></label>
+          <label>Ticket key<input name="ticket_key" placeholder="MB-10121"></label>
+          <label>Status<select name="status"><option>Active</option><option>Watching</option><option>Resolved</option><option>Archived</option></select></label>
+        </div>
+        <label>Relevance terms{render_tag_editor('relevance_terms', '', '1+1, multi-host, SCTE')}</label>
+        <label>Body<textarea name="body" placeholder="What should the TAM remember when planning upgrades?"></textarea></label>
+        <label>Source URL<input name="source_url" placeholder="Slack permalink, Jira, Confluence, email note"></label>
+        <button type="submit">Add advisory</button>
+      </form>
+    </section>
+  </div>
+</div>"""
+    return page("Advisories", body)
+
+
 def render_customer(slug: str, section: str = "overview", message: str = "") -> bytes:
     customer = row("select * from customers where slug = ?", (slug,))
     if customer is None:
@@ -2748,6 +2922,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     staff_env_map = {}
     for mapping in staff_environment_rows:
         staff_env_map.setdefault(mapping["staff_id"], {})[mapping["environment_id"]] = mapping["responsibility"]
+    advisory_matches = relevant_advisories_for_customer(cid)
+    advisory_items = render_advisory_items(advisory_matches)
 
     environment_options = '<option value="">Customer-wide</option>' + "".join(
         f'<option value="{env["id"]}">{esc(env["name"])}</option>'
@@ -2971,6 +3147,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         "staff": "Staff",
         "hardware": "Hardware",
         "software": "Software",
+        "advisories": "Advisories",
         "meetings": "Meetings",
         "notes": "Notes",
         "artifacts": "Artifacts",
@@ -2986,6 +3163,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     overview_section = f"""<section class="section">
       <h3>Overview</h3>
       <p>{esc(customer['overview'])}</p>
+      {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><p class="muted">Review before upgrades or major changes.</p></div>' if advisory_matches else ''}
       <dl class="facts">
         <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
@@ -3154,6 +3332,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             </form>
           </details>
         </section>""",
+        "advisories": f"""<section class="section">
+          <h3>Relevant Advisories</h3>
+          {advisory_items or '<div class="empty">No active advisories match this customer yet.</div>'}
+          <p class="muted">Matches are based on the customer profile, environments, source types, software product, versions, deployment mode, redundancy, and notes.</p>
+          <p><a href="/advisories">Manage advisories</a></p>
+        </section>""",
         "meetings": f"""<section class="section">
           <h3>Meetings</h3>
           {meeting_items or '<div class="empty">No meeting notes yet.</div>'}
@@ -3279,6 +3463,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/settings":
             self.send_html(render_settings())
             return
+        if path == "/advisories":
+            self.send_html(render_advisories())
+            return
         if path.startswith("/customers/"):
             parts = path.split("/")
             slug = parts[2]
@@ -3308,6 +3495,30 @@ class Handler(BaseHTTPRequestHandler):
                 set_app_setting(conn, "jira_sync_include_assignee", "1" if data.get("jira_sync_include_assignee") == "1" else "0", ts)
                 set_app_setting(conn, "jira_sync_include_reporter", "1" if data.get("jira_sync_include_reporter") == "1" else "0", ts)
             self.send_html(render_settings("Jira sync settings updated."))
+            return
+        if path == "/advisories":
+            with db() as conn:
+                conn.execute(
+                    """
+                    insert into advisories
+                      (title, severity, product, affected_versions, relevance_terms, body, ticket_key, source_url, status, created_at, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        data.get("title", ""),
+                        data.get("severity", "Info"),
+                        data.get("product", ""),
+                        data.get("affected_versions", ""),
+                        tags_csv(data.get("relevance_terms", "")),
+                        data.get("body", ""),
+                        data.get("ticket_key", "").upper(),
+                        data.get("source_url", ""),
+                        data.get("status", "Active"),
+                        ts,
+                        ts,
+                    ),
+                )
+            self.send_html(render_advisories("Advisory added."))
             return
         if path == "/jira/map-unmapped":
             wants_json = (
