@@ -654,6 +654,20 @@ def init_db() -> None:
               created_at text not null,
               updated_at text not null
             );
+
+            create table if not exists slack_signals (
+              id integer primary key,
+              customer_id integer references customers(id) on delete set null,
+              channel text default '',
+              source_date text default '',
+              author text default '',
+              permalink text default '',
+              signal_type text default '',
+              confidence text default '',
+              summary text default '',
+              raw_json text default '',
+              created_at text not null
+            );
             """
         )
         ts = now_utc()
@@ -888,6 +902,164 @@ def extract_json_array(text: str) -> list[dict]:
     if start != -1 and end != -1 and end > start:
         return json.loads(text[start : end + 1])
     raise ValueError("No JSON array found in proxy output")
+
+
+def extract_json_records(text: str) -> list[dict]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.S)
+        if fenced:
+            data = json.loads(fenced.group(1))
+        else:
+            starts = [pos for pos in (text.find("["), text.find("{")) if pos != -1]
+            if not starts:
+                raise ValueError("No JSON found")
+            start = min(starts)
+            end = text.rfind("]" if text[start] == "[" else "}")
+            if end <= start:
+                raise ValueError("No complete JSON found")
+            data = json.loads(text[start : end + 1])
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("records", "items", "signals", "results"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return [data]
+    return []
+
+
+def find_customer_for_signal(record: dict) -> sqlite3.Row | None:
+    explicit = str(record.get("customer") or record.get("customer_name") or "").strip()
+    haystack = " ".join(
+        str(record.get(key, ""))
+        for key in (
+            "customer",
+            "customer_name",
+            "parent_summary",
+            "short_summary",
+            "summary",
+            "customer_relevance_terms",
+        )
+    )
+    normalized_haystack = normalize_match(haystack)
+    for customer in rows("select id, slug, name, aliases from customers order by length(name) desc"):
+        names = [customer["name"], *parse_tags(customer["aliases"])]
+        for name in names:
+            normalized_name = normalize_match(name)
+            if explicit and normalize_match(explicit) == normalized_name:
+                return customer
+            if normalized_name and normalized_name in normalized_haystack:
+                return customer
+    return None
+
+
+def slack_record_text(record: dict) -> str:
+    replies = record.get("replies")
+    reply_text = ""
+    if isinstance(replies, list):
+        reply_text = " ".join(
+            str(reply.get("summary", ""))
+            for reply in replies
+            if isinstance(reply, dict)
+        )
+    return " ".join(
+        str(record.get(key, ""))
+        for key in ("parent_summary", "short_summary", "summary", "body")
+    ) + " " + reply_text
+
+
+def recommended_advisory_from_slack(record: dict) -> dict | None:
+    recommended = record.get("recommended_tam_console_record")
+    if isinstance(recommended, dict):
+        return recommended
+    if not record.get("advisory_candidate"):
+        return None
+    title = str(record.get("parent_summary") or record.get("short_summary") or record.get("summary") or "").strip()
+    if not title:
+        return None
+    ticket_keys = extract_ticket_keys(slack_record_text(record))
+    terms = record.get("customer_relevance_terms", "")
+    if isinstance(terms, list):
+        terms = ", ".join(str(term) for term in terms)
+    return {
+        "title": title[:160],
+        "severity": record.get("severity", "Info"),
+        "product": record.get("product", ""),
+        "affected_versions": record.get("affected_versions", ""),
+        "relevance_terms": terms,
+        "body": slack_record_text(record).strip(),
+        "ticket_key": ticket_keys[0] if ticket_keys else "",
+        "source_url": record.get("permalink", ""),
+        "status": "Active",
+    }
+
+
+def import_slack_records(text: str) -> str:
+    records = extract_json_records(text)
+    if not records:
+        return "No Slack JSON records found."
+    ts = now_utc()
+    signal_count = 0
+    advisory_count = 0
+    with db() as conn:
+        for record in records:
+            customer = find_customer_for_signal(record)
+            summary = str(record.get("short_summary") or record.get("summary") or record.get("parent_summary") or "").strip()
+            permalink = str(record.get("permalink") or record.get("source_url") or "").strip()
+            conn.execute(
+                """
+                insert into slack_signals
+                  (customer_id, channel, source_date, author, permalink, signal_type, confidence, summary, raw_json, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    customer["id"] if customer else None,
+                    str(record.get("channel") or "").strip(),
+                    str(record.get("date") or record.get("parent_date") or "").strip(),
+                    str(record.get("author") or record.get("parent_author") or "").strip(),
+                    permalink,
+                    str(record.get("signal_type") or ("advisory" if record.get("advisory_candidate") else "slack-context")),
+                    str(record.get("confidence") or "").strip(),
+                    summary,
+                    json.dumps(record),
+                    ts,
+                ),
+            )
+            signal_count += 1
+            advisory = recommended_advisory_from_slack(record)
+            if advisory:
+                existing = None
+                if advisory.get("source_url"):
+                    existing = conn.execute(
+                        "select id from advisories where source_url = ?",
+                        (str(advisory.get("source_url")),),
+                    ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """
+                        insert into advisories
+                          (title, severity, product, affected_versions, relevance_terms, body, ticket_key, source_url, status, created_at, updated_at)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(advisory.get("title", "")),
+                            str(advisory.get("severity", "Info")),
+                            str(advisory.get("product", "")),
+                            str(advisory.get("affected_versions", "")),
+                            tags_csv(str(advisory.get("relevance_terms", ""))),
+                            str(advisory.get("body", "")),
+                            str(advisory.get("ticket_key", "")).upper(),
+                            str(advisory.get("source_url", "")),
+                            str(advisory.get("status", "Active")),
+                            ts,
+                            ts,
+                        ),
+                    )
+                    advisory_count += 1
+    return f"Imported {signal_count} Slack signal(s) and created {advisory_count} advisory record(s)."
 
 
 def load_atlassian_config():
@@ -2800,6 +2972,13 @@ def render_home(message: str = "") -> bytes:
         <summary>Add advisory</summary>
         {render_advisory_form()}
       </details>
+      <details>
+        <summary>Import Claude Slack JSON</summary>
+        <form method="post" action="/slack/import">
+          <label>Claude Slack JSON<textarea name="payload" placeholder="Paste structured JSON returned by Claude's read-only Slack search"></textarea></label>
+          <button type="submit">Import Slack context</button>
+        </form>
+      </details>
     </section>
   </div>
 </div>"""
@@ -3627,6 +3806,13 @@ class Handler(BaseHTTPRequestHandler):
             with db() as conn:
                 save_ui_preference(conn, key, json.dumps(widths), ts)
             self.send_json({"ok": True, "key": key, "widths": widths})
+            return
+        if path == "/slack/import":
+            try:
+                message = import_slack_records(data.get("payload", ""))
+            except Exception as exc:
+                message = f"Slack import failed: {exc}"
+            self.send_html(render_home(message))
             return
         if path == "/jira/map-unmapped":
             wants_json = (
