@@ -176,6 +176,70 @@ def extract_ticket_keys(value: str) -> list[str]:
     return keys
 
 
+def customer_mapping_candidates() -> list[dict]:
+    customers = rows(
+        """
+        select id, name, aliases
+        from customers
+        order by is_pinned desc,
+                 case when sort_order = 0 then 1 else 0 end,
+                 sort_order,
+                 name
+        """
+    )
+    orgs_by_customer: dict[int, list[str]] = {}
+    for org in rows("select customer_id, organization_name from customer_jira_organizations"):
+        orgs_by_customer.setdefault(org["customer_id"], []).append(org["organization_name"])
+    candidates = []
+    for customer in customers:
+        terms = [customer["name"], *parse_tags(customer["aliases"])]
+        terms.extend(orgs_by_customer.get(customer["id"], []))
+        normalized_terms = []
+        seen = set()
+        for term in terms:
+            normalized = normalize_match(term)
+            if len(normalized) < 3 or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_terms.append((normalized, term))
+        candidates.append(
+            {
+                "id": customer["id"],
+                "name": customer["name"],
+                "terms": normalized_terms,
+            }
+        )
+    return candidates
+
+
+def suggest_customer_for_ticket(ticket: sqlite3.Row, candidates: list[dict]) -> dict | None:
+    text = normalize_match(
+        " ".join(
+            [
+                ticket["key"],
+                ticket["summary"],
+                ticket["reporter"],
+                ticket["notes"],
+                ticket["source"],
+            ]
+        )
+    )
+    best = None
+    for candidate in candidates:
+        for normalized, label in candidate["terms"]:
+            if normalized not in text:
+                continue
+            score = len(normalized)
+            if best is None or score > best["score"]:
+                best = {
+                    "id": candidate["id"],
+                    "name": candidate["name"],
+                    "label": label,
+                    "score": score,
+                }
+    return best
+
+
 def render_tag_editor(name: str, value: str = "", placeholder: str = "") -> str:
     return f"""<div class="tag-editor" data-tags="{esc(tags_csv(value))}">
       <div class="tag-editor-tags"></div>
@@ -1248,6 +1312,29 @@ def page(title: str, body: str) -> bytes:
     .map-customer-select {{
       min-width: 220px;
     }}
+    .map-cell {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 360px;
+    }}
+    .map-suggestion {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .map-suggestion strong {{ color: var(--ink); font-weight: 650; }}
+    .approve-map-button {{
+      width: 72px;
+      min-width: 72px;
+      padding-left: 0;
+      padding-right: 0;
+      text-align: center;
+      white-space: nowrap;
+    }}
     .map-customer-button {{
       width: 104px;
       min-width: 104px;
@@ -2038,6 +2125,75 @@ def page(title: str, body: str) -> bytes:
       ["health-green", "health-yellow", "health-red", "health-unknown"].forEach((name) => select.classList.remove(name));
       select.classList.add(["green", "yellow", "red"].includes(key) ? `health-${{key}}` : "health-unknown");
     }}
+    function initUnmappedJiraMapping() {{
+      const form = document.getElementById("map-unmapped-form");
+      if (!form) return;
+      const section = form.closest("section");
+      const status = document.createElement("span");
+      status.className = "muted";
+      status.style.marginLeft = "4px";
+      form.appendChild(status);
+      function removeMappedRows(keys) {{
+        keys.forEach((key) => {{
+          const row = section?.querySelector(`[data-unmapped-row="${{CSS.escape(key)}}"]`);
+          if (row) row.remove();
+        }});
+        const tbody = section?.querySelector("tbody");
+        if (tbody && !tbody.rows.length) {{
+          const table = section.querySelector(".table-scroll");
+          if (table) table.outerHTML = '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>';
+          form.remove();
+        }}
+      }}
+      async function submitMapping(formData, button) {{
+        if (button) {{
+          button.disabled = true;
+          button.dataset.originalText = button.textContent || "";
+          button.textContent = "Mapping...";
+        }}
+        status.textContent = "Mapping...";
+        try {{
+          const response = await fetch(form.action, {{
+            method: "POST",
+            body: new URLSearchParams(formData),
+            headers: {{
+              "Accept": "application/json",
+              "X-Requested-With": "fetch",
+            }},
+          }});
+          const result = await response.json();
+          if (!response.ok || result.ok === false) throw new Error(result.message || "Mapping failed.");
+          removeMappedRows(result.mapped_keys || []);
+          status.textContent = result.message || "Mapped.";
+        }} catch (error) {{
+          status.textContent = error.message || "Mapping failed.";
+        }} finally {{
+          if (button && document.body.contains(button)) {{
+            button.disabled = false;
+            button.textContent = button.dataset.originalText || "Approve";
+          }}
+        }}
+      }}
+      form.addEventListener("submit", (event) => {{
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        submitMapping(new FormData(form), form.querySelector("button[type='submit']"));
+      }});
+      section?.querySelectorAll("[data-map-approve]").forEach((button) => {{
+        button.addEventListener("click", () => {{
+          const row = button.closest("[data-unmapped-row]");
+          const select = row?.querySelector("[data-map-select]");
+          if (!row || !select || !select.value) {{
+            status.textContent = "Pick a customer before approving.";
+            return;
+          }}
+          const formData = new FormData();
+          formData.set("key", row.dataset.unmappedRow || button.dataset.mapApprove || "");
+          formData.set("customer_id", select.value);
+          submitMapping(formData, button);
+        }});
+      }});
+    }}
     function initSubmitBusyState() {{
       document.querySelectorAll("form").forEach((form) => {{
         form.addEventListener("submit", () => {{
@@ -2067,6 +2223,7 @@ def page(title: str, body: str) -> bytes:
       initResizableTables();
       initCustomerSearch();
       initCustomerBulkActions();
+      initUnmappedJiraMapping();
       initSubmitBusyState();
       initTicketFilters();
     }});
@@ -2272,32 +2429,42 @@ def render_home(message: str = "") -> bytes:
             """
         )
     )
-    customer_options = "".join(
-        f'<option value="{r["id"]}">{esc(r["name"])}</option>'
-        for r in rows(
-            """
-            select id, name
-            from customers
-            order by is_pinned desc,
-                     case when sort_order = 0 then 1 else 0 end,
-                     sort_order,
-                     name
-            """
-        )
+    customers_for_mapping = rows(
+        """
+        select id, name
+        from customers
+        order by is_pinned desc,
+                 case when sort_order = 0 then 1 else 0 end,
+                 sort_order,
+                 name
+        """
     )
+    candidates = customer_mapping_candidates()
+
+    def mapping_options(selected_id: int | None = None) -> str:
+        return "".join(
+            f'<option value="{r["id"]}"{" selected" if selected_id == r["id"] else ""}>{esc(r["name"])}</option>'
+            for r in customers_for_mapping
+        )
+
     unmapped_rows = "".join(
-        f"""<tr>
+        (
+            lambda suggestion: f"""<tr data-unmapped-row="{esc(r['key'])}">
           <td><a href="{esc(r['url'])}" target="_blank">{esc(r['key'])}</a></td>
           <td>{esc(r['summary'])}</td>
           <td>{esc(r['status'])}</td>
           <td>{esc(r['reporter'])}</td>
           <td>{esc(r['updated'])}</td>
           <td>
-            <select class="map-customer-select" form="map-unmapped-form" name="map_{esc(r['key'])}">
-              <option value="">Unmapped</option>{customer_options}
-            </select>
+            <div class="map-cell">
+              <select class="map-customer-select" form="map-unmapped-form" name="map_{esc(r['key'])}" data-map-select>
+                <option value="">Unmapped</option>{mapping_options(suggestion['id'] if suggestion else None)}
+              </select>
+              {f'<span class="map-suggestion">Suggested <strong>{esc(suggestion["name"])}</strong></span><button class="approve-map-button" type="button" data-map-approve="{esc(r["key"])}">Approve</button>' if suggestion else '<span class="muted">No suggestion</span>'}
+            </div>
           </td>
         </tr>"""
+        )(suggest_customer_for_ticket(r, candidates))
         for r in rows(
             """
             select *
@@ -2361,9 +2528,9 @@ def render_home(message: str = "") -> bytes:
         <div class="gap-list">{gap_items}</div>
       </section>
     </div>
-    <section class="section">
+    <section id="unmapped-jira" class="section">
       <h3>Unmapped Jira Tickets</h3>
-      {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Choose customers below, then map all selected tickets at once.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
+      {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped#unmapped-jira"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Review suggestions, change any dropdown, then map selected tickets.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
     </section>
   </div>
 </div>"""
@@ -3071,6 +3238,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def redirect(self, location: str) -> None:
         self.send_response(303)
         self.send_header("Location", location)
@@ -3135,6 +3310,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(render_settings("Jira sync settings updated."))
             return
         if path == "/jira/map-unmapped":
+            wants_json = (
+                "application/json" in self.headers.get("Accept", "")
+                or self.headers.get("X-Requested-With", "") == "fetch"
+            )
             mappings = []
             for field, values in getattr(self, "form_values", {}).items():
                 if not field.startswith("map_"):
@@ -3152,10 +3331,14 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     mappings = []
             if not mappings:
+                if wants_json:
+                    self.send_json({"ok": False, "message": "No Jira tickets were selected for mapping."}, 400)
+                    return
                 self.send_html(render_home("No Jira tickets were selected for mapping."))
                 return
             mapped = 0
             skipped = 0
+            mapped_keys = []
             with db() as conn:
                 for key, customer_id in mappings:
                     ticket = conn.execute("select * from unmapped_jira_tickets where key = ?", (key,)).fetchone()
@@ -3189,9 +3372,21 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     conn.execute("delete from unmapped_jira_tickets where key = ?", (key,))
                     mapped += 1
+                    mapped_keys.append(key)
             message = f"Mapped {mapped} Jira ticket(s)."
             if skipped:
                 message += f" Skipped {skipped} missing ticket/customer mapping(s)."
+            if wants_json:
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "mapped": mapped,
+                        "skipped": skipped,
+                        "mapped_keys": mapped_keys,
+                    }
+                )
+                return
             self.send_html(render_home(message))
             return
         with db() as conn:
