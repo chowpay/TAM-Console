@@ -381,8 +381,39 @@ def init_db() -> None:
               created_at text not null,
               unique(customer_id, normalized_name)
             );
+
+            create table if not exists app_settings (
+              key text primary key,
+              value text not null,
+              updated_at text not null
+            );
+
+            create table if not exists unmapped_jira_tickets (
+              key text primary key,
+              summary text default '',
+              status text default '',
+              priority text default '',
+              assignee text default '',
+              reporter text default '',
+              updated text default '',
+              url text default '',
+              notes text default '',
+              source text default '',
+              synced_at text not null,
+              created_at text not null
+            );
             """
         )
+        ts = now_utc()
+        for key, value in {
+            "jira_sync_projects": "ESD, CS, FR, MB",
+            "jira_sync_include_assignee": "1",
+            "jira_sync_include_reporter": "1",
+        }.items():
+            conn.execute(
+                "insert or ignore into app_settings (key, value, updated_at) values (?, ?, ?)",
+                (key, value, ts),
+            )
         org_indexes = [
             r["name"]
             for r in conn.execute("pragma index_list(customer_jira_organizations)").fetchall()
@@ -478,6 +509,87 @@ def row(query: str, params: tuple = ()) -> sqlite3.Row | None:
         return conn.execute(query, params).fetchone()
 
 
+def app_setting(key: str, default: str = "") -> str:
+    setting = row("select value from app_settings where key = ?", (key,))
+    return setting["value"] if setting is not None else default
+
+
+def set_app_setting(conn: sqlite3.Connection, key: str, value: str, ts: str) -> None:
+    conn.execute(
+        """
+        insert into app_settings (key, value, updated_at)
+        values (?, ?, ?)
+        on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, ts),
+    )
+
+
+def jira_sync_projects_from_text(value: str) -> list[str]:
+    projects = []
+    seen = set()
+    for raw in re.split(r"[,;\s]+", value or ""):
+        project = re.sub(r"[^A-Za-z0-9_-]", "", raw).upper()
+        if not project or project in seen:
+            continue
+        seen.add(project)
+        projects.append(project)
+    return projects or ["ESD", "CS", "FR", "MB"]
+
+
+def jira_sync_projects() -> list[str]:
+    return jira_sync_projects_from_text(app_setting("jira_sync_projects", "ESD, CS, FR, MB"))
+
+
+def jira_sync_ownership_clause() -> str:
+    clauses = []
+    if app_setting("jira_sync_include_assignee", "1") == "1":
+        clauses.append("assignee = currentUser()")
+    if app_setting("jira_sync_include_reporter", "1") == "1":
+        clauses.append("reporter = currentUser()")
+    if not clauses:
+        clauses.append("assignee = currentUser()")
+    return "(" + " OR ".join(clauses) + ")"
+
+
+def upsert_unmapped_jira_ticket(conn: sqlite3.Connection, issue: dict, item: dict, source: str, ts: str) -> None:
+    fields = issue.get("fields", {})
+    reporter = fields.get("reporter") or {}
+    updated_date = str(item.get("updated_date", "")).split("T", 1)[0]
+    conn.execute(
+        """
+        insert into unmapped_jira_tickets
+          (key, summary, status, priority, assignee, reporter, updated, url, notes, source, synced_at, created_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(key) do update set
+          summary=excluded.summary,
+          status=excluded.status,
+          priority=excluded.priority,
+          assignee=excluded.assignee,
+          reporter=excluded.reporter,
+          updated=excluded.updated,
+          url=excluded.url,
+          notes=excluded.notes,
+          source=excluded.source,
+          synced_at=excluded.synced_at
+        """,
+        (
+            item.get("key", ""),
+            item.get("summary", ""),
+            item.get("status", ""),
+            item.get("priority", ""),
+            item.get("assignee", ""),
+            reporter.get("displayName", ""),
+            updated_date,
+            item.get("url", ""),
+            item.get("brief_summary", ""),
+            source,
+            ts,
+            ts,
+        ),
+    )
+
+
 def extract_json_array(text: str) -> list[dict]:
     try:
         data = json.loads(text)
@@ -544,7 +656,7 @@ def jira_request(path: str, payload: dict | None = None) -> dict:
 
 
 def jira_get_issue(issue_key: str) -> dict:
-    fields = ",".join(["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"])
+    fields = ",".join(["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"])
     try:
         return jira_request(f"/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}")
     except RuntimeError as exc:
@@ -556,7 +668,7 @@ def jql_string(value: str) -> str:
 
 
 def jira_search_issues(jql: str, max_results: int = 50) -> list[dict]:
-    fields = ["summary", "description", "status", "priority", "assignee", "updated"]
+    fields = ["summary", "description", "status", "priority", "assignee", "reporter", "updated"]
     data = jira_request(
         "/rest/api/3/search/jql",
         {
@@ -573,7 +685,7 @@ def chunks(values: list[str], size: int) -> list[list[str]]:
 
 
 def jira_get_issues_by_keys(issue_keys: list[str]) -> list[dict]:
-    fields = ["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"]
+    fields = ["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"]
     issues = []
     seen = set()
     clean_keys = []
@@ -920,13 +1032,14 @@ def import_assigned_jira_tickets() -> str:
     before_tickets = row("select count(*) as n from tickets")["n"]
     before_customers = row("select count(*) as n from customers")["n"]
     before_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
-    jql = "assignee = currentUser() AND project in (ESD, CS, FR, MB) ORDER BY updated DESC"
+    projects = jira_sync_projects()
+    jql = f"{jira_sync_ownership_clause()} AND project in ({', '.join(projects)}) ORDER BY updated DESC"
     issues = []
     next_token = None
     while True:
         payload = {
             "jql": jql,
-            "fields": ["summary", "description", "status", "priority", "assignee", "updated", "customfield_10002"],
+            "fields": ["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"],
             "maxResults": 100,
         }
         if next_token:
@@ -940,14 +1053,24 @@ def import_assigned_jira_tickets() -> str:
     ts = now_utc()
     imported_keys = set()
     org_ids = set()
-    skipped_no_org = 0
+    queued_no_org = 0
     with db() as conn:
         for issue in issues:
+            item = issue_to_ticket_item(issue)
             orgs = issue.get("fields", {}).get("customfield_10002") or []
             if not orgs:
-                skipped_no_org += 1
+                existing_links = conn.execute(
+                    "select distinct customer_id from tickets where key = ?",
+                    (item.get("key", ""),),
+                ).fetchall()
+                if existing_links:
+                    for link in existing_links:
+                        upsert_ticket_items_with_conn(conn, link["customer_id"], [item], ts)
+                        imported_keys.add(f"{link['customer_id']}:{item.get('key', '')}")
+                else:
+                    upsert_unmapped_jira_ticket(conn, issue, item, "jira-sync-no-organization", ts)
+                    queued_no_org += 1
                 continue
-            item = issue_to_ticket_item(issue)
             for org in orgs:
                 customer_id = find_or_create_customer_for_org(conn, org, ts)
                 org_ids.add(str(org.get("id", "") or org.get("name", "")))
@@ -958,10 +1081,10 @@ def import_assigned_jira_tickets() -> str:
     after_customers = row("select count(*) as n from customers")["n"]
     after_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
     return (
-        f"Processed {len(imported_keys)} assigned ticket link(s) across {len(org_ids)} Jira organization(s). "
+        f"Processed {len(imported_keys)} Jira-owned ticket link(s) across {len(org_ids)} Jira organization(s). "
         f"Added {after_tickets - before_tickets} ticket link(s), "
         f"{after_customers - before_customers} customer(s), and {after_orgs - before_orgs} org mapping(s). "
-        f"Skipped {skipped_no_org} assigned ticket(s) with no Organization."
+        f"Queued {queued_no_org} ticket(s) with no Organization for manual mapping."
     )
 
 
@@ -1935,6 +2058,7 @@ def page(title: str, body: str) -> bytes:
         <input type="search" name="q" placeholder="Search customers or tickets">
         <button type="submit">Search</button>
       </form>
+      <a href="/settings">Settings</a>
       <button id="theme-toggle" class="theme-button" type="button" onclick="toggleTheme()">Light mode</button>
     </div>
   </header>
@@ -2128,6 +2252,34 @@ def render_home(message: str = "") -> bytes:
             """
         )
     )
+    customer_options = "".join(
+        f'<option value="{r["id"]}">{esc(r["name"])}</option>'
+        for r in rows("select id, name from customers order by name")
+    )
+    unmapped_rows = "".join(
+        f"""<tr>
+          <td><a href="{esc(r['url'])}" target="_blank">{esc(r['key'])}</a></td>
+          <td>{esc(r['summary'])}</td>
+          <td>{esc(r['status'])}</td>
+          <td>{esc(r['reporter'])}</td>
+          <td>{esc(r['updated'])}</td>
+          <td>
+            <form method="post" action="/jira/map-unmapped" style="padding:0;border:0;background:transparent;display:flex;gap:6px">
+              <input type="hidden" name="key" value="{esc(r['key'])}">
+              <select name="customer_id" required><option value="">Map to customer</option>{customer_options}</select>
+              <button type="submit">Map</button>
+            </form>
+          </td>
+        </tr>"""
+        for r in rows(
+            """
+            select *
+            from unmapped_jira_tickets
+            order by updated desc, key
+            limit 20
+            """
+        )
+    )
     body = f"""<div class="layout">
   {render_sidebar()}
   <div class="stack">
@@ -2182,6 +2334,10 @@ def render_home(message: str = "") -> bytes:
         <div class="gap-list">{gap_items}</div>
       </section>
     </div>
+    <section class="section">
+      <h3>Unmapped Jira Tickets</h3>
+      {f'<div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
+    </section>
   </div>
 </div>"""
     return page("Dashboard", body)
@@ -2268,6 +2424,38 @@ def render_search(query: str = "") -> bytes:
   </div>
 </div>"""
     return page("Search", body)
+
+
+def render_settings(message: str = "") -> bytes:
+    include_assignee = app_setting("jira_sync_include_assignee", "1") == "1"
+    include_reporter = app_setting("jira_sync_include_reporter", "1") == "1"
+    projects = app_setting("jira_sync_projects", "ESD, CS, FR, MB")
+    body = f"""<div class="layout">
+  {render_sidebar()}
+  <div class="stack">
+    {f'<details class="status-panel" open><summary><strong>Settings saved</strong></summary><p>{esc(message)}</p></details>' if message else ''}
+    <section class="section">
+      <h2>Settings</h2>
+      <form method="post" action="/settings">
+        <h3>Jira Sync</h3>
+        <label>Projects
+          <input name="jira_sync_projects" value="{esc(projects)}" placeholder="ESD, CS, FR, MB">
+        </label>
+        <label class="check-row">
+          <input type="checkbox" name="jira_sync_include_assignee" value="1"{' checked' if include_assignee else ''}>
+          <span>Include tickets assigned to me</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" name="jira_sync_include_reporter" value="1"{' checked' if include_reporter else ''}>
+          <span>Include tickets reported by me</span>
+        </label>
+        <p class="muted">Reporter-based sync is useful for FR/MB tickets that do not have a Jira Organization. Those tickets can still be manually mapped by adding them under a customer.</p>
+        <button type="submit">Save settings</button>
+      </form>
+    </section>
+  </div>
+</div>"""
+    return page("Settings", body)
 
 
 def render_customer(slug: str, section: str = "overview", message: str = "") -> bytes:
@@ -2886,6 +3074,9 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             self.send_html(render_search(params.get("q", [""])[0]))
             return
+        if path == "/settings":
+            self.send_html(render_settings())
+            return
         if path.startswith("/customers/"):
             parts = path.split("/")
             slug = parts[2]
@@ -2907,6 +3098,50 @@ class Handler(BaseHTTPRequestHandler):
                 message = f"Jira sync failed: {exc}"
                 sys.stderr.write(f"{now_utc()} failed {path}: {exc}\n")
             self.send_html(render_home(message))
+            return
+        if path == "/settings":
+            projects = ", ".join(jira_sync_projects_from_text(data.get("jira_sync_projects", "")))
+            with db() as conn:
+                set_app_setting(conn, "jira_sync_projects", projects or "ESD, CS, FR, MB", ts)
+                set_app_setting(conn, "jira_sync_include_assignee", "1" if data.get("jira_sync_include_assignee") == "1" else "0", ts)
+                set_app_setting(conn, "jira_sync_include_reporter", "1" if data.get("jira_sync_include_reporter") == "1" else "0", ts)
+            self.send_html(render_settings("Jira sync settings updated."))
+            return
+        if path == "/jira/map-unmapped":
+            key = data.get("key", "").upper()
+            customer_id = int(data["customer_id"]) if data.get("customer_id") else 0
+            with db() as conn:
+                ticket = conn.execute("select * from unmapped_jira_tickets where key = ?", (key,)).fetchone()
+                customer = conn.execute("select id from customers where id = ?", (customer_id,)).fetchone()
+                if ticket is None or customer is None:
+                    self.send_html(render_home("Unable to map Jira ticket: missing ticket or customer."))
+                    return
+                conn.execute(
+                    """
+                    insert into tickets
+                      (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    on conflict(customer_id, key) do update set
+                      summary=excluded.summary, status=excluded.status, priority=excluded.priority,
+                      assignee=excluded.assignee, updated=excluded.updated, url=excluded.url,
+                      notes=excluded.notes, synced_at=excluded.synced_at
+                    """,
+                    (
+                        customer_id,
+                        ticket["key"],
+                        ticket["summary"],
+                        ticket["status"],
+                        ticket["priority"],
+                        ticket["assignee"],
+                        ticket["updated"],
+                        ticket["url"],
+                        ticket["notes"],
+                        ts,
+                        ts,
+                    ),
+                )
+                conn.execute("delete from unmapped_jira_tickets where key = ?", (key,))
+            self.send_html(render_home(f"Mapped {key} to selected customer."))
             return
         with db() as conn:
             if path == "/customers":
@@ -3127,6 +3362,31 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif action == "tickets":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
+                ticket_data = {
+                    "key": data.get("key", "").upper(),
+                    "summary": data.get("summary", ""),
+                    "status": data.get("status", ""),
+                    "priority": data.get("priority", ""),
+                    "assignee": data.get("assignee", ""),
+                    "updated": data.get("updated", ""),
+                    "url": data.get("url", ""),
+                    "notes": data.get("notes", ""),
+                }
+                try:
+                    issue = jira_get_issue(ticket_data["key"])
+                    item = issue_to_ticket_item(issue)
+                    ticket_data = {
+                        "key": item.get("key", ticket_data["key"]),
+                        "summary": ticket_data["summary"] or item.get("summary", ""),
+                        "status": ticket_data["status"] or item.get("status", ""),
+                        "priority": ticket_data["priority"] or item.get("priority", ""),
+                        "assignee": ticket_data["assignee"] or item.get("assignee", ""),
+                        "updated": ticket_data["updated"] or str(item.get("updated_date", "")).split("T", 1)[0],
+                        "url": ticket_data["url"] or item.get("url", ""),
+                        "notes": ticket_data["notes"] or item.get("brief_summary", ""),
+                    }
+                except Exception:
+                    pass
                 conn.execute(
                     """
                     insert into tickets
@@ -3140,14 +3400,14 @@ class Handler(BaseHTTPRequestHandler):
                     (
                         cid,
                         environment_id,
-                        data.get("key", ""),
-                        data.get("summary", ""),
-                        data.get("status", ""),
-                        data.get("priority", ""),
-                        data.get("assignee", ""),
-                        data.get("updated", ""),
-                        data.get("url", ""),
-                        data.get("notes", ""),
+                        ticket_data["key"],
+                        ticket_data["summary"],
+                        ticket_data["status"],
+                        ticket_data["priority"],
+                        ticket_data["assignee"],
+                        ticket_data["updated"],
+                        ticket_data["url"],
+                        ticket_data["notes"],
                         ts,
                     ),
                 )
