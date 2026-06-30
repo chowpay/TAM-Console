@@ -1289,6 +1289,31 @@ def page(title: str, body: str) -> bytes:
       color: var(--ink);
       border: 1px solid var(--line);
     }}
+    .progress-shell {{
+      position: relative;
+      height: 8px;
+      margin: 0 12px 12px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--input);
+    }}
+    .progress-shell::before {{
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -35%;
+      width: 35%;
+      border-radius: 999px;
+      background: var(--accent);
+      animation: progress-slide 1.2s ease-in-out infinite;
+    }}
+    @keyframes progress-slide {{
+      0% {{ left: -35%; }}
+      55% {{ left: 55%; }}
+      100% {{ left: 100%; }}
+    }}
     .running-panel {{ display: none; }}
     .running-panel.visible {{ display: block; }}
     .actions {{
@@ -2107,8 +2132,9 @@ def render_home(message: str = "") -> bytes:
   {render_sidebar()}
   <div class="stack">
     <details id="jira-sync-running" class="status-panel running-panel" open>
-      <summary><strong>Syncing Jira</strong><span class="muted">Started <span data-started-at>now</span></span></summary>
+      <summary><strong>Syncing Jira</strong><span class="muted">Working · started <span data-started-at>now</span></span></summary>
       <p>Importing assigned tickets and refreshing existing local ticket links. You can leave this open while it runs; the dashboard will return when the sync finishes.</p>
+      <div class="progress-shell" aria-label="Jira sync in progress"></div>
     </details>
     {f'''<details id="dashboard-status" class="status-panel" open>
       <summary><strong>Last dashboard action</strong><span class="status-panel-actions"><button type="button" onclick="document.getElementById('dashboard-status').remove()">Dismiss</button></span></summary>
