@@ -1236,6 +1236,26 @@ def page(title: str, body: str) -> bytes:
       margin-bottom: 4px;
     }}
     .customer-row.hidden-customer-row {{ grid-template-columns: minmax(0, 1fr) auto; }}
+    .map-customer-actions {{
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      margin: 0 0 10px;
+    }}
+    .map-customer-select {{
+      min-width: 220px;
+    }}
+    .map-customer-button {{
+      width: 104px;
+      min-width: 104px;
+      padding-left: 0;
+      padding-right: 0;
+      text-align: center;
+      white-space: nowrap;
+    }}
     .customer-bulk-check {{
       width: 16px;
       height: 16px;
@@ -2254,7 +2274,16 @@ def render_home(message: str = "") -> bytes:
     )
     customer_options = "".join(
         f'<option value="{r["id"]}">{esc(r["name"])}</option>'
-        for r in rows("select id, name from customers order by name")
+        for r in rows(
+            """
+            select id, name
+            from customers
+            order by is_pinned desc,
+                     case when sort_order = 0 then 1 else 0 end,
+                     sort_order,
+                     name
+            """
+        )
     )
     unmapped_rows = "".join(
         f"""<tr>
@@ -2264,11 +2293,9 @@ def render_home(message: str = "") -> bytes:
           <td>{esc(r['reporter'])}</td>
           <td>{esc(r['updated'])}</td>
           <td>
-            <form method="post" action="/jira/map-unmapped" style="padding:0;border:0;background:transparent;display:flex;gap:6px">
-              <input type="hidden" name="key" value="{esc(r['key'])}">
-              <select name="customer_id" required><option value="">Map to customer</option>{customer_options}</select>
-              <button type="submit">Map</button>
-            </form>
+            <select class="map-customer-select" form="map-unmapped-form" name="map_{esc(r['key'])}">
+              <option value="">Unmapped</option>{customer_options}
+            </select>
           </td>
         </tr>"""
         for r in rows(
@@ -2336,7 +2363,7 @@ def render_home(message: str = "") -> bytes:
     </div>
     <section class="section">
       <h3>Unmapped Jira Tickets</h3>
-      {f'<div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
+      {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Choose customers below, then map all selected tickets at once.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
     </section>
   </div>
 </div>"""
@@ -3108,40 +3135,64 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html(render_settings("Jira sync settings updated."))
             return
         if path == "/jira/map-unmapped":
-            key = data.get("key", "").upper()
-            customer_id = int(data["customer_id"]) if data.get("customer_id") else 0
+            mappings = []
+            for field, values in getattr(self, "form_values", {}).items():
+                if not field.startswith("map_"):
+                    continue
+                raw_customer_id = values[0].strip() if values else ""
+                if not raw_customer_id:
+                    continue
+                try:
+                    mappings.append((field[4:].upper(), int(raw_customer_id)))
+                except ValueError:
+                    continue
+            if not mappings and data.get("key") and data.get("customer_id"):
+                try:
+                    mappings.append((data["key"].upper(), int(data["customer_id"])))
+                except ValueError:
+                    mappings = []
+            if not mappings:
+                self.send_html(render_home("No Jira tickets were selected for mapping."))
+                return
+            mapped = 0
+            skipped = 0
             with db() as conn:
-                ticket = conn.execute("select * from unmapped_jira_tickets where key = ?", (key,)).fetchone()
-                customer = conn.execute("select id from customers where id = ?", (customer_id,)).fetchone()
-                if ticket is None or customer is None:
-                    self.send_html(render_home("Unable to map Jira ticket: missing ticket or customer."))
-                    return
-                conn.execute(
-                    """
-                    insert into tickets
-                      (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    on conflict(customer_id, key) do update set
-                      summary=excluded.summary, status=excluded.status, priority=excluded.priority,
-                      assignee=excluded.assignee, updated=excluded.updated, url=excluded.url,
-                      notes=excluded.notes, synced_at=excluded.synced_at
-                    """,
-                    (
-                        customer_id,
-                        ticket["key"],
-                        ticket["summary"],
-                        ticket["status"],
-                        ticket["priority"],
-                        ticket["assignee"],
-                        ticket["updated"],
-                        ticket["url"],
-                        ticket["notes"],
-                        ts,
-                        ts,
-                    ),
-                )
-                conn.execute("delete from unmapped_jira_tickets where key = ?", (key,))
-            self.send_html(render_home(f"Mapped {key} to selected customer."))
+                for key, customer_id in mappings:
+                    ticket = conn.execute("select * from unmapped_jira_tickets where key = ?", (key,)).fetchone()
+                    customer = conn.execute("select id from customers where id = ?", (customer_id,)).fetchone()
+                    if ticket is None or customer is None:
+                        skipped += 1
+                        continue
+                    conn.execute(
+                        """
+                        insert into tickets
+                          (customer_id, key, summary, status, priority, assignee, updated, url, notes, synced_at, created_at)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        on conflict(customer_id, key) do update set
+                          summary=excluded.summary, status=excluded.status, priority=excluded.priority,
+                          assignee=excluded.assignee, updated=excluded.updated, url=excluded.url,
+                          notes=excluded.notes, synced_at=excluded.synced_at
+                        """,
+                        (
+                            customer_id,
+                            ticket["key"],
+                            ticket["summary"],
+                            ticket["status"],
+                            ticket["priority"],
+                            ticket["assignee"],
+                            ticket["updated"],
+                            ticket["url"],
+                            ticket["notes"],
+                            ts,
+                            ts,
+                        ),
+                    )
+                    conn.execute("delete from unmapped_jira_tickets where key = ?", (key,))
+                    mapped += 1
+            message = f"Mapped {mapped} Jira ticket(s)."
+            if skipped:
+                message += f" Skipped {skipped} missing ticket/customer mapping(s)."
+            self.send_html(render_home(message))
             return
         with db() as conn:
             if path == "/customers":
