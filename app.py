@@ -137,6 +137,23 @@ def valid_health(value: str) -> str:
     return health if normalize_match(health) in {"unknown", "green", "yellow", "red"} else "Unknown"
 
 
+def health_reason(signal_health: dict | sqlite3.Row | None) -> str:
+    if not signal_health or not signal_health["signal_count"]:
+        return "No imported Slack health signals yet."
+    current_points = int(signal_health["health_points"] or 0)
+    raw_points = int(signal_health["raw_health_points"] or current_points)
+    open_tickets = int(signal_health["open_ticket_count"] or 0)
+    if current_points == 0 and raw_points > 0 and open_tickets == 0:
+        return f"Historical signals are present, but related risk is currently clear: {open_tickets} open linked tickets and old/resolved signals reduce {raw_points} raw points to 0."
+    if current_points >= 80:
+        return f"High current risk from {current_points} adjusted signal points and {open_tickets} open linked ticket(s)."
+    if current_points >= 25:
+        return f"Medium current risk from {current_points} adjusted signal points and {open_tickets} open linked ticket(s)."
+    if current_points > 0:
+        return f"Low current risk from {current_points} adjusted signal points and {open_tickets} open linked ticket(s)."
+    return f"No current signal risk after adjustments; {open_tickets} open linked ticket(s)."
+
+
 def editable_health_badge(slug: str, value: str) -> str:
     options = []
     for option in ("Unknown", "Green", "Yellow", "Red"):
@@ -169,6 +186,7 @@ def render_health_controls(slug: str, manual_health: str, signal_health: sqlite3
     return f"""<div class="health-stack">
       <div class="health-row"><span class="muted">Manual</span>{editable_health_badge(slug, manual)}</div>
       <div class="health-row"><span class="muted">Suggested</span>{health_badge(suggested)}<span class="muted">{points} pts</span>{apply_button}</div>
+      <div class="health-reason">{esc(health_reason(signal_health))}</div>
     </div>"""
 
 
@@ -2468,6 +2486,12 @@ def page(title: str, body: str) -> bytes:
       padding: 5px 9px;
       min-height: 28px;
       font-size: 0.78rem;
+    }}
+    .health-reason {{
+      max-width: 620px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.35;
     }}
     .gap-list {{ display: grid; gap: 8px; }}
     .gap-item {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }}
