@@ -2857,25 +2857,40 @@ def page(title: str, body: str) -> bytes:
           function addResizer(edge) {{
             const resizer = document.createElement("span");
             resizer.className = edge === "left" ? "column-resizer column-resizer-left" : "column-resizer";
-            resizer.title = edge === "left" ? "Drag to resize this column" : "Drag to resize column";
+            resizer.title = "Drag to resize columns";
             th.appendChild(resizer);
             resizer.addEventListener("click", (event) => event.stopPropagation());
             resizer.addEventListener("pointerdown", (event) => {{
             event.preventDefault();
             event.stopPropagation();
             const startX = event.clientX;
-            const startWidth = th.getBoundingClientRect().width;
+            const primaryIndex = edge === "left" ? columnIndex : columnIndex;
+            const neighborIndex = edge === "left" ? columnIndex - 1 : columnIndex + 1;
+            const neighborTh = table.tHead?.rows[0]?.cells[neighborIndex];
+            const startPrimaryWidth = th.getBoundingClientRect().width;
+            const startNeighborWidth = neighborTh ? neighborTh.getBoundingClientRect().width : 0;
             document.body.classList.add("resizing-column");
             resizer.setPointerCapture(event.pointerId);
             function onMove(moveEvent) {{
-              const delta = edge === "left" ? startX - moveEvent.clientX : moveEvent.clientX - startX;
-              const nextWidth = Math.max(72, startWidth + delta);
-              applyColumnWidth(table, columnIndex, nextWidth);
+              const rawDelta = moveEvent.clientX - startX;
+              const delta = edge === "left" ? -rawDelta : rawDelta;
+              let nextPrimaryWidth = Math.max(72, startPrimaryWidth + delta);
+              if (neighborTh) {{
+                let nextNeighborWidth = Math.max(72, startNeighborWidth - delta);
+                const maxPrimaryWidth = startPrimaryWidth + startNeighborWidth - 72;
+                if (nextPrimaryWidth > maxPrimaryWidth) {{
+                  nextPrimaryWidth = maxPrimaryWidth;
+                  nextNeighborWidth = 72;
+                }}
+                applyColumnWidth(table, neighborIndex, nextNeighborWidth);
+              }}
+              applyColumnWidth(table, primaryIndex, nextPrimaryWidth);
               th.dataset.resized = "1";
             }}
             function onUp(upEvent) {{
               const saved = storedWidths(storageKey);
-              saved[columnIndex] = Math.round(th.getBoundingClientRect().width);
+              saved[primaryIndex] = Math.round(th.getBoundingClientRect().width);
+              if (neighborTh) saved[neighborIndex] = Math.round(neighborTh.getBoundingClientRect().width);
               saveWidths(storageKey, saved);
               document.body.classList.remove("resizing-column");
               resizer.releasePointerCapture(upEvent.pointerId);
@@ -3393,7 +3408,7 @@ def render_home(message: str = "") -> bytes:
       </div>
       <section id="unmapped-jira" class="section">
       <h3>Unmapped Jira Tickets</h3>
-      {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped#unmapped-jira"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Review suggestions, change any dropdown, then map selected tickets.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Summary</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
+      {f'<form id="map-unmapped-form" class="map-customer-actions" method="post" action="/jira/map-unmapped#unmapped-jira"><button class="map-customer-button" type="submit">Map selected</button><span class="muted">Review suggestions, change any dropdown, then map selected tickets.</span></form><div class="table-scroll"><table><thead><tr><th>Key</th><th>Title</th><th>Status</th><th>Reporter</th><th>Updated</th><th>Map to customer</th></tr></thead><tbody>{unmapped_rows}</tbody></table></div>' if unmapped_rows else '<div class="empty">No unmapped Jira tickets waiting for customer mapping.</div>'}
       </section>
     </div>
     <section id="dashboard-advisories" class="section dashboard-panel" data-dashboard-panel="advisories" hidden>
@@ -3493,7 +3508,7 @@ def render_search(query: str = "") -> bytes:
     </section>
     <section class="section">
       <h3>Tickets</h3>
-      {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Key</th><th>Summary</th><th>Status</th><th>Updated</th><th>Short summary</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if ticket_rows else '<div class="empty">No ticket matches.</div>'}
+      {f'<div class="table-scroll"><table><thead><tr><th>Customer</th><th>Key</th><th>Title</th><th>Status</th><th>Updated</th><th>Short summary</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if ticket_rows else '<div class="empty">No ticket matches.</div>'}
     </section>
   </div>
 </div>"""
@@ -3977,7 +3992,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit">Sync existing Jira tickets</button>
             </form>
           </div>
-          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button><button type="button" data-ticket-filter="fr">FR</button><button type="button" data-ticket-filter="mb">MB</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Summary</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
+          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button><button type="button" data-ticket-filter="fr">FR</button><button type="button" data-ticket-filter="mb">MB</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Title</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
