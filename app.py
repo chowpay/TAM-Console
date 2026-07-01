@@ -3159,7 +3159,7 @@ def page(title: str, body: str) -> bytes:
 </html>""".encode()
 
 
-def render_sidebar(active_slug: str = "") -> str:
+def render_sidebar(active_slug: str = "", active_section: str = "") -> str:
     customers = rows(
         """
         select id, slug, name, status, is_pinned, is_hidden, sort_order
@@ -3175,6 +3175,8 @@ def render_sidebar(active_slug: str = "") -> str:
 
     def customer_sidebar_row(customer: sqlite3.Row, hidden: bool = False) -> str:
         active = " active" if customer["slug"] == active_slug else ""
+        section_suffix = "" if active_section in {"", "overview"} else f"/{esc(active_section)}"
+        customer_href = f"/customers/{esc(customer['slug'])}{section_suffix}"
         pin_label = "Unpin" if customer["is_pinned"] else "Pin"
         pin_mark = '<span class="pin-mark">PIN</span>' if customer["is_pinned"] else ""
         action_buttons = (
@@ -3192,7 +3194,7 @@ def render_sidebar(active_slug: str = "") -> str:
         hidden_class = " hidden-customer-row" if hidden else ""
         return f"""<div class="customer-row{hidden_class}">
               {checkbox}
-              <a class="customer-link{active}" href="/customers/{esc(customer["slug"])}">
+              <a class="customer-link{active}" href="{customer_href}">
                 {esc(customer["name"])}{pin_mark}<br><span class="muted">{esc(customer["status"])}</span>
               </a>
               <div class="customer-tools">
@@ -4150,7 +4152,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     }
 
     body = f"""<div class="layout">
-  {render_sidebar(customer['slug'])}
+  {render_sidebar(customer['slug'], section)}
   <div class="stack">
     {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
     <section class="section">
