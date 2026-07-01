@@ -440,13 +440,16 @@ def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]])
           <span class="tag">{esc(advisory['severity'])}</span>
           <strong>{esc(advisory['title'])}</strong>
           <p>{esc(advisory['body'])}</p>
-          <dl class="facts">
-            <dt>Product</dt><dd>{esc(advisory['product']) or '<span class="muted">Any</span>'}</dd>
-            <dt>Affected versions</dt><dd>{esc(advisory['affected_versions']) or '<span class="muted">Not specified</span>'}</dd>
-            <dt>Matched</dt><dd>{render_tags(', '.join(matched_terms))}</dd>
-            <dt>Ticket</dt><dd>{render_ticket_link(advisory['ticket_key'])}</dd>
-            <dt>Source</dt><dd>{render_source_link(advisory['source_url'])}</dd>
-          </dl>
+          <details class="advisory-meta">
+            <summary><span>Details</span><span>{render_ticket_link(advisory['ticket_key'])} · {render_source_link(advisory['source_url'])}</span></summary>
+            <dl class="facts">
+              <dt>Product</dt><dd>{esc(advisory['product']) or '<span class="muted">Any</span>'}</dd>
+              <dt>Affected versions</dt><dd>{esc(advisory['affected_versions']) or '<span class="muted">Not specified</span>'}</dd>
+              <dt>Matched</dt><dd>{render_tags(', '.join(matched_terms))}</dd>
+              <dt>Ticket</dt><dd>{render_ticket_link(advisory['ticket_key'])}</dd>
+              <dt>Source</dt><dd>{render_source_link(advisory['source_url'])}</dd>
+            </dl>
+          </details>
         </article>"""
         for advisory, matched_terms in advisory_matches
     )
@@ -2206,6 +2209,24 @@ def page(title: str, body: str) -> bytes:
     th:first-child, td:first-child {{ min-width: 96px; white-space: nowrap; }}
     .item {{ padding: 14px; }}
     .item + .item {{ margin-top: 10px; }}
+    .item p {{ margin: 8px 0; }}
+    .advisory-meta {{
+      margin-top: 8px;
+      border-top: 1px solid var(--line);
+      padding-top: 8px;
+    }}
+    .advisory-meta summary {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    .advisory-meta .facts {{
+      margin-top: 10px;
+      grid-template-columns: 130px minmax(0, 1fr);
+    }}
     .tag {{ display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px; color: var(--muted); }}
     form {{ padding: 16px; display: grid; gap: 10px; }}
     label {{ display: grid; gap: 5px; color: var(--muted); font-size: 13px; }}
