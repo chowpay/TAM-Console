@@ -2252,8 +2252,12 @@ def page(title: str, body: str) -> bytes:
       padding: 12px;
       color: var(--muted);
     }}
+    .signal-risk-panel,
     .relationship-context {{
       padding: 12px;
+    }}
+    .signal-risk-panel p {{
+      padding: 8px 0 0;
     }}
     .relationship-context .facts {{
       margin: 12px 0 0;
@@ -3597,7 +3601,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     signal_health_panel = ""
     if signal_health and signal_health["signal_count"]:
         signal_health_panel = (
-            f"""<div class="status-panel">
+            f"""<div class="status-panel signal-risk-panel">
               <strong>Current signal risk: {signal_health['health_points']} point(s)</strong>
               <p class="muted">{signal_health['signal_count']} imported Slack signal(s), {signal_health['raw_health_points']} raw point(s), {signal_health['open_ticket_count']} open linked ticket(s). Resolved linked tickets and older signals reduce current risk. Base formula: 1-24 Green, 25-79 Yellow, 80+ Red. Manual health stays authoritative until you apply the suggestion.</p>
             </div>"""
