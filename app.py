@@ -2182,19 +2182,23 @@ def page(title: str, body: str) -> bytes:
     .column-resizer {{
       position: absolute;
       top: 0;
-      right: -3px;
-      width: 8px;
+      right: 0;
+      width: 6px;
       height: 100%;
       cursor: col-resize;
       touch-action: none;
       z-index: 1;
+    }}
+    .column-resizer-left {{
+      left: 0;
+      right: auto;
     }}
     .column-resizer::after {{
       content: "";
       position: absolute;
       top: 8px;
       bottom: 8px;
-      left: 3px;
+      left: 2px;
       width: 1px;
       background: transparent;
     }}
@@ -2850,13 +2854,13 @@ def page(title: str, body: str) -> bytes:
           if (width) applyColumnWidth(table, columnIndex, width);
         }});
         Array.from(table.tHead.rows[0].cells).forEach((th, columnIndex) => {{
-          if (th.querySelector(".column-resizer")) return;
-          const resizer = document.createElement("span");
-          resizer.className = "column-resizer";
-          resizer.title = "Drag to resize column";
-          th.appendChild(resizer);
-          resizer.addEventListener("click", (event) => event.stopPropagation());
-          resizer.addEventListener("pointerdown", (event) => {{
+          function addResizer(edge) {{
+            const resizer = document.createElement("span");
+            resizer.className = edge === "left" ? "column-resizer column-resizer-left" : "column-resizer";
+            resizer.title = edge === "left" ? "Drag to resize this column" : "Drag to resize column";
+            th.appendChild(resizer);
+            resizer.addEventListener("click", (event) => event.stopPropagation());
+            resizer.addEventListener("pointerdown", (event) => {{
             event.preventDefault();
             event.stopPropagation();
             const startX = event.clientX;
@@ -2864,7 +2868,8 @@ def page(title: str, body: str) -> bytes:
             document.body.classList.add("resizing-column");
             resizer.setPointerCapture(event.pointerId);
             function onMove(moveEvent) {{
-              const nextWidth = Math.max(72, startWidth + moveEvent.clientX - startX);
+              const delta = edge === "left" ? startX - moveEvent.clientX : moveEvent.clientX - startX;
+              const nextWidth = Math.max(72, startWidth + delta);
               applyColumnWidth(table, columnIndex, nextWidth);
               th.dataset.resized = "1";
             }}
@@ -2881,7 +2886,10 @@ def page(title: str, body: str) -> bytes:
             resizer.addEventListener("pointermove", onMove);
             resizer.addEventListener("pointerup", onUp);
             resizer.addEventListener("pointercancel", onUp);
-          }});
+            }});
+          }}
+          if (!th.querySelector(".column-resizer:not(.column-resizer-left)")) addResizer("right");
+          if (columnIndex > 0 && !th.querySelector(".column-resizer-left")) addResizer("left");
         }});
       }});
     }}
