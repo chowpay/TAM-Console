@@ -350,6 +350,21 @@ def affected_customers_for_advisory(advisory: sqlite3.Row) -> list[tuple[sqlite3
     return matches
 
 
+def render_ticket_link(ticket_key: str) -> str:
+    key = (ticket_key or "").strip().upper()
+    if not key:
+        return '<span class="muted">None</span>'
+    return f'<a href="https://tag.atlassian.net/browse/{esc(key)}" target="_blank">{esc(key)}</a>'
+
+
+def render_source_link(source_url: str) -> str:
+    url = (source_url or "").strip()
+    if not url:
+        return '<span class="muted">Manual</span>'
+    label = "Slack" if "slack.com/" in url.lower() else "source"
+    return f'<a href="{esc(url)}" target="_blank">{label}</a>'
+
+
 def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]]) -> str:
     return "".join(
         f"""<article class="item">
@@ -360,11 +375,24 @@ def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]])
             <dt>Product</dt><dd>{esc(advisory['product']) or '<span class="muted">Any</span>'}</dd>
             <dt>Affected versions</dt><dd>{esc(advisory['affected_versions']) or '<span class="muted">Not specified</span>'}</dd>
             <dt>Matched</dt><dd>{render_tags(', '.join(matched_terms))}</dd>
-            <dt>Ticket</dt><dd>{f'<a href="https://tag.atlassian.net/browse/{esc(advisory["ticket_key"])}" target="_blank">{esc(advisory["ticket_key"])}</a>' if advisory['ticket_key'] else '<span class="muted">None</span>'}</dd>
-            <dt>Source</dt><dd>{f'<a href="{esc(advisory["source_url"])}" target="_blank">source</a>' if advisory['source_url'] else '<span class="muted">Manual</span>'}</dd>
+            <dt>Ticket</dt><dd>{render_ticket_link(advisory['ticket_key'])}</dd>
+            <dt>Source</dt><dd>{render_source_link(advisory['source_url'])}</dd>
           </dl>
         </article>"""
         for advisory, matched_terms in advisory_matches
+    )
+
+
+def customer_signal_health_summary(customer_id: int) -> sqlite3.Row | None:
+    return row(
+        """
+        select count(*) as signal_count,
+               coalesce(sum(health_points), 0) as health_points,
+               max(created_at) as last_signal
+        from slack_signals
+        where customer_id = ?
+        """,
+        (customer_id,),
     )
 
 
@@ -397,7 +425,7 @@ def render_advisory_table(advisories: list[sqlite3.Row] | None = None) -> str:
           <td>{esc(a['affected_versions'])}</td>
           <td>{render_tags(a['relevance_terms'])}</td>
           <td>{', '.join(f'<a href="/customers/{esc(customer["slug"])}">{esc(customer["name"])}</a>' for customer, _ in affected) or '<span class="muted">No matches</span>'}</td>
-          <td>{f'<a href="https://tag.atlassian.net/browse/{esc(a["ticket_key"])}" target="_blank">{esc(a["ticket_key"])}</a>' if a['ticket_key'] else '<span class="muted">None</span>'}</td>
+          <td>{render_ticket_link(a['ticket_key'])}</td>
           <td>{esc(a['status'])}</td>
         </tr>"""
         )(affected_customers_for_advisory(a))
@@ -683,6 +711,8 @@ def init_db() -> None:
               permalink text default '',
               signal_type text default '',
               confidence text default '',
+              health_points integer default 0,
+              health_impact text default '',
               summary text default '',
               raw_json text default '',
               created_at text not null
@@ -763,6 +793,14 @@ def init_db() -> None:
         }
         if "source_types" not in env_cols:
             conn.execute("alter table environments add column source_types text default ''")
+        slack_cols = {
+            r["name"]
+            for r in conn.execute("pragma table_info(slack_signals)").fetchall()
+        }
+        if "health_points" not in slack_cols:
+            conn.execute("alter table slack_signals add column health_points integer default 0")
+        if "health_impact" not in slack_cols:
+            conn.execute("alter table slack_signals add column health_impact text default ''")
         customer_cols = {
             r["name"]
             for r in conn.execute("pragma table_info(customers)").fetchall()
@@ -1016,6 +1054,106 @@ def recommended_advisory_from_slack(record: dict) -> dict | None:
     }
 
 
+def slack_signal_health_score(record: dict) -> tuple[int, str]:
+    signal_type = normalize_match(str(record.get("signal_type") or ""))
+    confidence = normalize_match(str(record.get("confidence") or "medium"))
+    base_scores = {
+        "outage": 40,
+        "escalation": 35,
+        "unansweredask": 30,
+        "servicedegradation": 25,
+        "regression": 25,
+        "upgradeblocker": 20,
+        "bug": 15,
+        "advisory": 10,
+        "deployment": 5,
+        "general": 0,
+        "slackcontext": 0,
+    }
+    score = base_scores.get(signal_type, 0)
+    if confidence == "low":
+        score = round(score * 0.5)
+    elif confidence == "high":
+        score = round(score * 1.2)
+    if score >= 35:
+        impact = "High risk"
+    elif score >= 20:
+        impact = "Medium risk"
+    elif score > 0:
+        impact = "Low risk"
+    else:
+        impact = "Context only"
+    return score, impact
+
+
+def advisory_ticket_match(advisory: sqlite3.Row) -> str:
+    text = " ".join([advisory["title"], advisory["body"], advisory["relevance_terms"]])
+    explicit_keys = extract_ticket_keys(text)
+    if explicit_keys:
+        return explicit_keys[0]
+    affected = affected_customers_for_advisory(advisory)
+    if len(affected) != 1:
+        return ""
+    customer = affected[0][0]
+    source_signal = row("select source_date from slack_signals where permalink = ?", (advisory["source_url"],))
+    source_day = None
+    if source_signal and source_signal["source_date"]:
+        try:
+            source_day = datetime.fromisoformat(source_signal["source_date"][:10]).date()
+        except ValueError:
+            source_day = None
+    if source_day:
+        nearby = []
+        for ticket in rows("select key, updated from tickets where customer_id = ? and updated != ''", (customer["id"],)):
+            try:
+                ticket_day = datetime.fromisoformat(ticket["updated"][:10]).date()
+            except ValueError:
+                continue
+            day_delta = abs((ticket_day - source_day).days)
+            if day_delta <= 3:
+                nearby.append((day_delta, ticket["key"]))
+        if len(nearby) == 1:
+            return nearby[0][1]
+        if nearby:
+            nearby.sort()
+            if len(nearby) == 1 or nearby[0][0] < nearby[1][0]:
+                return nearby[0][1]
+    generic_terms = {
+        "mcm", "mcs", "tag", "source", "sources", "video", "audio", "issue",
+        "customer", "upgrade", "license", "licenses", "error", "errors",
+    }
+    advisory_terms = {term for term in search_terms(text) if term not in generic_terms and len(term) >= 4}
+    best_key = ""
+    best_score = 0
+    for ticket in rows("select key, summary, notes from tickets where customer_id = ?", (customer["id"],)):
+        ticket_terms = {
+            term
+            for term in search_terms(" ".join([ticket["key"], ticket["summary"], ticket["notes"]]))
+            if term not in generic_terms and len(term) >= 4
+        }
+        score = len(advisory_terms & ticket_terms)
+        if score > best_score:
+            best_score = score
+            best_key = ticket["key"]
+    return best_key if best_score >= 4 else ""
+
+
+def backfill_advisory_ticket_links() -> int:
+    updated = 0
+    ts = now_utc()
+    with db() as conn:
+        for advisory in conn.execute("select * from advisories where coalesce(ticket_key, '') = ''").fetchall():
+            ticket_key = advisory_ticket_match(advisory)
+            if not ticket_key:
+                continue
+            conn.execute(
+                "update advisories set ticket_key = ?, updated_at = ? where id = ?",
+                (ticket_key, ts, advisory["id"]),
+            )
+            updated += 1
+    return updated
+
+
 def import_slack_records(text: str) -> str:
     records = extract_json_records(text)
     if not records:
@@ -1032,11 +1170,13 @@ def import_slack_records(text: str) -> str:
             if permalink and conn.execute("select 1 from slack_signals where permalink = ?", (permalink,)).fetchone():
                 skipped_signals += 1
                 continue
+            health_points, health_impact = slack_signal_health_score(record)
             conn.execute(
                 """
                 insert into slack_signals
-                  (customer_id, channel, source_date, author, permalink, signal_type, confidence, summary, raw_json, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  (customer_id, channel, source_date, author, permalink, signal_type, confidence,
+                   health_points, health_impact, summary, raw_json, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     customer["id"] if customer else None,
@@ -1046,6 +1186,8 @@ def import_slack_records(text: str) -> str:
                     permalink,
                     str(record.get("signal_type") or ("advisory" if record.get("advisory_candidate") else "slack-context")),
                     str(record.get("confidence") or "").strip(),
+                    health_points,
+                    health_impact,
                     summary,
                     json.dumps(record),
                     ts,
@@ -1082,9 +1224,10 @@ def import_slack_records(text: str) -> str:
                         ),
                     )
                     advisory_count += 1
+    linked = backfill_advisory_ticket_links()
     return (
         f"Imported {signal_count} Slack signal(s), skipped {skipped_signals} duplicate(s), "
-        f"and created {advisory_count} advisory record(s)."
+        f"created {advisory_count} advisory record(s), and linked {linked} advisory ticket(s)."
     )
 
 
@@ -3224,6 +3367,15 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         staff_env_map.setdefault(mapping["staff_id"], {})[mapping["environment_id"]] = mapping["responsibility"]
     advisory_matches = relevant_advisories_for_customer(cid)
     advisory_items = render_advisory_items(advisory_matches)
+    signal_health = customer_signal_health_summary(cid)
+    signal_health_panel = ""
+    if signal_health and signal_health["signal_count"]:
+        signal_health_panel = (
+            f"""<div class="status-panel">
+              <strong>Slack signal risk: {signal_health['health_points']} point(s)</strong>
+              <p class="muted">{signal_health['signal_count']} imported Slack signal(s). Use this as context before changing manual health.</p>
+            </div>"""
+        )
 
     environment_options = '<option value="">Customer-wide</option>' + "".join(
         f'<option value="{env["id"]}">{esc(env["name"])}</option>'
@@ -3463,6 +3615,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <h3>Overview</h3>
       <p>{esc(customer['overview'])}</p>
       {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><div class="stack">{advisory_items}</div></div>' if advisory_matches else ''}
+      {signal_health_panel}
       <dl class="facts">
         <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
