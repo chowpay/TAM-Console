@@ -3841,8 +3841,6 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <h3>Overview</h3>
       <p>{esc(customer['overview'])}</p>
       {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><div class="stack">{advisory_items}</div></div>' if advisory_matches else ''}
-      {signal_health_panel}
-      {render_relationship_context(cid, signal_health)}
       <dl class="facts">
         <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
@@ -4071,6 +4069,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
       </dl>
+      {signal_health_panel}
+      {render_relationship_context(cid, signal_health)}
     </section>
     <nav class="tabs">{tabs}</nav>
     {sections[section]}
