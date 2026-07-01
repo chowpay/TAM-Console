@@ -2156,6 +2156,8 @@ def page(title: str, body: str) -> bytes:
     .section h2, .section h3 {{ margin: 0 0 12px; font-size: 18px; }}
     .muted {{ color: var(--muted); }}
     .grid-2 {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }}
+    .customer-summary-grid {{ display: grid; grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.25fr); gap: 24px; align-items: start; }}
+    .customer-summary-grid .facts {{ grid-template-columns: 120px minmax(0, 1fr); }}
     .facts {{ display: grid; grid-template-columns: 150px 1fr; gap: 8px 14px; }}
     .facts dt {{ color: var(--muted); }}
     .facts dd {{ margin: 0; }}
@@ -2631,7 +2633,7 @@ def page(title: str, body: str) -> bytes:
     }}
     #tickets.section {{ padding-left: 16px; padding-right: 16px; }}
     @media (max-width: 860px) {{
-      .layout, .grid-2, .dashboard-grid, .panel-grid {{ grid-template-columns: 1fr; }}
+      .layout, .grid-2, .dashboard-grid, .panel-grid, .customer-summary-grid {{ grid-template-columns: 1fr; }}
       header {{ padding: 0 14px; }}
       main {{ padding: 14px; }}
       .table-scroll table {{ min-width: 920px; }}
@@ -4067,14 +4069,18 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     {f'<section class="section"><strong>{esc(message)}</strong></section>' if message else ''}
     <section class="section">
       <h2>{esc(customer['name'])}</h2>
-      <dl class="facts">
-        <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
-        <dt>Status</dt><dd>{esc(customer['status'])}</dd>
-        <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
-        <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
-        <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
-        <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
-      </dl>
+      <div class="customer-summary-grid">
+        <dl class="facts">
+          <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
+        </dl>
+        <dl class="facts">
+          <dt>Status</dt><dd>{esc(customer['status'])}</dd>
+          <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
+          <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
+          <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
+          <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
+        </dl>
+      </div>
     </section>
     <nav class="tabs">{tabs}</nav>
     {sections[section]}
