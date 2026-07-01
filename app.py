@@ -2237,6 +2237,9 @@ def page(title: str, body: str) -> bytes:
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
+      padding: 12px;
+    }}
+    details.status-panel {{
       padding: 0;
     }}
     .status-panel summary {{
@@ -2254,10 +2257,6 @@ def page(title: str, body: str) -> bytes:
       padding: 12px;
       color: var(--muted);
     }}
-    .signal-risk-panel,
-    .relationship-context {{
-      padding: 12px;
-    }}
     .signal-risk-panel p {{
       padding: 8px 0 0;
     }}
@@ -2267,6 +2266,9 @@ def page(title: str, body: str) -> bytes:
     .relationship-context dd {{
       display: grid;
       gap: 3px;
+    }}
+    .status-panel > .stack {{
+      margin-top: 12px;
     }}
     .status-panel-actions {{
       display: flex;
