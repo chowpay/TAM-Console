@@ -4095,7 +4095,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
           <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
           <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
           <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
-          <dt>Updated</dt><dd>{esc(customer['updated_at'])}</dd>
+          <dt>Profile updated</dt><dd>{esc(customer['updated_at'])}</dd>
         </dl>
       </div>
     </section>
