@@ -3873,17 +3873,10 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <p>{esc(customer['overview'])}</p>
       {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><div class="stack">{advisory_items}</div></div>' if advisory_matches else ''}
       <dl class="facts">
-        <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
-        <dt>Status</dt><dd>{esc(customer['status'])}</dd>
-        <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
-        <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Last touch</dt><dd>{esc(customer['last_touch']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Risk reason</dt><dd>{esc(customer['risk_reason']) or '<span class="muted">None</span>'}</dd>
         <dt>Aliases</dt><dd>{esc(customer['aliases'])}</dd>
-        <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Region</dt><dd>{esc(customer['region']) or '<span class="muted">Not set</span>'}</dd>
-        <dt>Products</dt><dd>{esc(customer['products'])}</dd>
-        <dt>Updated</dt><dd>{esc(customer['updated_at'])}</dd>
       </dl>
       <details>
         <summary>Edit profile</summary>
@@ -4102,6 +4095,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
           <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
           <dt>Owner</dt><dd>{esc(customer['owner']) or '<span class="muted">Not set</span>'}</dd>
           <dt>Products</dt><dd>{esc(customer['products']) or '<span class="muted">Not set</span>'}</dd>
+          <dt>Updated</dt><dd>{esc(customer['updated_at'])}</dd>
         </dl>
       </div>
     </section>
