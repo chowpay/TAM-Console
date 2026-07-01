@@ -115,6 +115,21 @@ def health_badge(value: str) -> str:
     return f'<span class="health-pill health-{key}"><span class="health-dot"></span>{esc(health)}</span>'
 
 
+def suggested_health_from_points(points: int) -> str:
+    if points >= 80:
+        return "Red"
+    if points >= 25:
+        return "Yellow"
+    if points > 0:
+        return "Green"
+    return "Unknown"
+
+
+def valid_health(value: str) -> str:
+    health = (value or "Unknown").strip() or "Unknown"
+    return health if normalize_match(health) in {"unknown", "green", "yellow", "red"} else "Unknown"
+
+
 def editable_health_badge(slug: str, value: str) -> str:
     options = []
     for option in ("Unknown", "Green", "Yellow", "Red"):
@@ -126,6 +141,24 @@ def editable_health_badge(slug: str, value: str) -> str:
         {''.join(options)}
       </select>
     </form>"""
+
+
+def render_health_controls(slug: str, manual_health: str, signal_health: sqlite3.Row | None = None) -> str:
+    manual = valid_health(manual_health)
+    if not signal_health or not signal_health["signal_count"]:
+        return editable_health_badge(slug, manual)
+    points = int(signal_health["health_points"] or 0)
+    suggested = suggested_health_from_points(points)
+    apply_button = ""
+    if suggested != "Unknown" and normalize_match(suggested) != normalize_match(manual):
+        apply_button = f"""<form class="health-suggestion-apply" method="post" action="/customers/{esc(slug)}/health-suggestion">
+          <input type="hidden" name="health" value="{esc(suggested)}">
+          <button type="submit">Apply</button>
+        </form>"""
+    return f"""<div class="health-stack">
+      <div class="health-row"><span class="muted">Manual</span>{editable_health_badge(slug, manual)}</div>
+      <div class="health-row"><span class="muted">Suggested</span>{health_badge(suggested)}<span class="muted">{points} pts</span>{apply_button}</div>
+    </div>"""
 
 
 DASHBOARD_HELP = {
@@ -2335,6 +2368,30 @@ def page(title: str, body: str) -> bytes:
       opacity: 0;
       cursor: pointer;
     }}
+    .health-stack {{
+      display: grid;
+      gap: 6px;
+      min-width: 220px;
+    }}
+    .health-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .health-row > .muted:first-child {{
+      min-width: 72px;
+      font-size: 0.8rem;
+    }}
+    .health-suggestion-apply {{
+      display: inline-flex;
+      margin: 0;
+    }}
+    .health-suggestion-apply button {{
+      padding: 5px 9px;
+      min-height: 28px;
+      font-size: 0.78rem;
+    }}
     .gap-list {{ display: grid; gap: 8px; }}
     .gap-item {{ display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }}
     .empty {{ color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; padding: 16px; }}
@@ -3373,7 +3430,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         signal_health_panel = (
             f"""<div class="status-panel">
               <strong>Slack signal risk: {signal_health['health_points']} point(s)</strong>
-              <p class="muted">{signal_health['signal_count']} imported Slack signal(s). Use this as context before changing manual health.</p>
+              <p class="muted">{signal_health['signal_count']} imported Slack signal(s). Base formula: 1-24 Green, 25-79 Yellow, 80+ Red. Manual health stays authoritative until you apply the suggestion.</p>
             </div>"""
         )
 
@@ -3617,7 +3674,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><div class="stack">{advisory_items}</div></div>' if advisory_matches else ''}
       {signal_health_panel}
       <dl class="facts">
-        <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
+        <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
         <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
@@ -3837,7 +3894,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     <section class="section">
       <h2>{esc(customer['name'])}</h2>
       <dl class="facts">
-        <dt>Health</dt><dd>{editable_health_badge(customer['slug'], customer['health'])}</dd>
+        <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
         <dt>Next action</dt><dd>{esc(customer['next_action']) or '<span class="muted">Not set</span>'}</dd>
         <dt>Action due</dt><dd>{esc(customer['next_action_due']) or '<span class="muted">Not set</span>'}</dd>
@@ -4146,9 +4203,14 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
             elif action == "health":
-                health = data.get("health", "Unknown")
-                if normalize_match(health) not in {"unknown", "green", "yellow", "red"}:
-                    health = "Unknown"
+                health = valid_health(data.get("health", "Unknown"))
+                conn.execute(
+                    "update customers set health = ?, updated_at = ? where id = ?",
+                    (health, ts, cid),
+                )
+                redirect_section = "overview"
+            elif action == "health-suggestion":
+                health = valid_health(data.get("health", "Unknown"))
                 conn.execute(
                     "update customers set health = ?, updated_at = ? where id = ?",
                     (health, ts, cid),
