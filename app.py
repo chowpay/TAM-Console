@@ -115,12 +115,19 @@ def health_badge(value: str) -> str:
     return f'<span class="health-pill health-{key}"><span class="health-dot"></span>{esc(health)}</span>'
 
 
-def suggested_health_from_points(points: int) -> str:
+def ticket_status_is_resolved(status: str) -> bool:
+    normalized = normalize_match(status)
+    return normalized in {"done", "resolved", "closed"} or "resolutionprovided" in normalized
+
+
+def suggested_health_from_points(points: int, has_signals: bool = False, open_ticket_count: int = 0) -> str:
     if points >= 80:
         return "Red"
     if points >= 25:
         return "Yellow"
     if points > 0:
+        return "Green"
+    if has_signals and open_ticket_count == 0:
         return "Green"
     return "Unknown"
 
@@ -148,7 +155,11 @@ def render_health_controls(slug: str, manual_health: str, signal_health: sqlite3
     if not signal_health or not signal_health["signal_count"]:
         return editable_health_badge(slug, manual)
     points = int(signal_health["health_points"] or 0)
-    suggested = suggested_health_from_points(points)
+    suggested = suggested_health_from_points(
+        points,
+        bool(signal_health["signal_count"]),
+        int(signal_health["open_ticket_count"] or 0),
+    )
     apply_button = ""
     if suggested != "Unknown" and normalize_match(suggested) != normalize_match(manual):
         apply_button = f"""<form class="health-suggestion-apply" method="post" action="/customers/{esc(slug)}/health-suggestion">
@@ -417,16 +428,82 @@ def render_advisory_items(advisory_matches: list[tuple[sqlite3.Row, list[str]]])
 
 
 def customer_signal_health_summary(customer_id: int) -> sqlite3.Row | None:
-    return row(
+    signal_rows = rows(
         """
-        select count(*) as signal_count,
-               coalesce(sum(health_points), 0) as health_points,
-               max(created_at) as last_signal
+        select id, health_points, source_date, permalink, summary, raw_json
         from slack_signals
         where customer_id = ?
         """,
         (customer_id,),
     )
+    if not signal_rows:
+        return None
+    ticket_statuses = {
+        ticket["key"].upper(): ticket["status"]
+        for ticket in rows("select key, status from tickets where customer_id = ?", (customer_id,))
+    }
+    open_ticket_count = sum(
+        1 for status in ticket_statuses.values()
+        if not ticket_status_is_resolved(status)
+    )
+    raw_points = 0
+    adjusted_points = 0
+    resolved_signal_count = 0
+    stale_signal_count = 0
+    no_open_ticket_credit = 0
+    latest_signal = ""
+    today = datetime.now(timezone.utc).date()
+    for signal in signal_rows:
+        points = int(signal["health_points"] or 0)
+        raw_points += points
+        latest_signal = max(latest_signal, signal["source_date"] or "")
+        age_multiplier = 1.0
+        if signal["source_date"]:
+            try:
+                source_day = datetime.fromisoformat(signal["source_date"][:10]).date()
+                age_days = max(0, (today - source_day).days)
+                if age_days > 180:
+                    age_multiplier = 0.05
+                    stale_signal_count += 1
+                elif age_days > 90:
+                    age_multiplier = 0.25
+                    stale_signal_count += 1
+                elif age_days > 30:
+                    age_multiplier = 0.5
+            except ValueError:
+                age_multiplier = 1.0
+        signal_text = " ".join([signal["summary"] or "", signal["raw_json"] or ""])
+        linked_keys = set(extract_ticket_keys(signal_text))
+        for advisory in rows(
+            "select ticket_key from advisories where source_url = ? and coalesce(ticket_key, '') != ''",
+            (signal["permalink"] or "",),
+        ):
+            linked_keys.update(extract_ticket_keys(advisory["ticket_key"]))
+        resolution_multiplier = 1.0
+        linked_statuses = [
+            ticket_statuses[key]
+            for key in linked_keys
+            if key in ticket_statuses
+        ]
+        if linked_statuses and all(ticket_status_is_resolved(status) for status in linked_statuses):
+            resolution_multiplier = 0.2
+            resolved_signal_count += 1
+        elif any(not ticket_status_is_resolved(status) for status in linked_statuses):
+            resolution_multiplier = 1.2
+        adjusted_points += round(points * age_multiplier * resolution_multiplier)
+    if open_ticket_count == 0 and adjusted_points > 0:
+        no_open_ticket_credit = min(15, adjusted_points)
+        adjusted_points -= no_open_ticket_credit
+    return {
+        "signal_count": len(signal_rows),
+        "raw_health_points": raw_points,
+        "health_points": adjusted_points,
+        "last_signal": latest_signal,
+        "open_ticket_count": open_ticket_count,
+        "resolved_signal_count": resolved_signal_count,
+        "stale_signal_count": stale_signal_count,
+        "no_open_ticket_credit": no_open_ticket_credit,
+    }
 
 
 def advisory_rows() -> list[sqlite3.Row]:
@@ -3429,8 +3506,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     if signal_health and signal_health["signal_count"]:
         signal_health_panel = (
             f"""<div class="status-panel">
-              <strong>Slack signal risk: {signal_health['health_points']} point(s)</strong>
-              <p class="muted">{signal_health['signal_count']} imported Slack signal(s). Base formula: 1-24 Green, 25-79 Yellow, 80+ Red. Manual health stays authoritative until you apply the suggestion.</p>
+              <strong>Current signal risk: {signal_health['health_points']} point(s)</strong>
+              <p class="muted">{signal_health['signal_count']} imported Slack signal(s), {signal_health['raw_health_points']} raw point(s), {signal_health['open_ticket_count']} open linked ticket(s). Resolved linked tickets and older signals reduce current risk. Base formula: 1-24 Green, 25-79 Yellow, 80+ Red. Manual health stays authoritative until you apply the suggestion.</p>
             </div>"""
         )
 
