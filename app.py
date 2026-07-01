@@ -102,6 +102,13 @@ def tags_csv(value: str) -> str:
     return ", ".join(parse_tags(value))
 
 
+def short_text(value: str, limit: int = 220) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
 def render_tags(value: str) -> str:
     tags = parse_tags(value)
     return " ".join(f'<span class="tag">{esc(tag)}</span>' for tag in tags) or '<span class="muted">Not set</span>'
@@ -522,6 +529,57 @@ def customer_signal_health_summary(customer_id: int) -> sqlite3.Row | None:
         "stale_signal_count": stale_signal_count,
         "no_open_ticket_credit": no_open_ticket_credit,
     }
+
+
+def render_relationship_context(customer_id: int, signal_health: dict | sqlite3.Row | None) -> str:
+    latest_signal = row(
+        """
+        select channel, source_date, author, permalink, signal_type, summary, health_impact
+        from slack_signals
+        where customer_id = ?
+        order by source_date desc, created_at desc, id desc
+        limit 1
+        """,
+        (customer_id,),
+    )
+    latest_resolved_ticket = row(
+        """
+        select key, summary, status, updated, url
+        from tickets
+        where customer_id = ?
+          and (lower(status) in ('done', 'resolved', 'closed')
+               or lower(status) like '%resolution provided%')
+        order by updated desc, key
+        limit 1
+        """,
+        (customer_id,),
+    )
+    latest_topic = '<span class="muted">No imported Slack/email topic yet.</span>'
+    if latest_signal:
+        source = render_source_link(latest_signal["permalink"])
+        channel = f' · #{esc(latest_signal["channel"])}' if latest_signal["channel"] else ""
+        latest_topic = (
+            f"""<strong>{esc(short_text(latest_signal['summary'], 180))}</strong>
+            <span class="muted">{esc(latest_signal['source_date'])}{channel} · {source}</span>"""
+        )
+    resolved_issue = '<span class="muted">No resolved customer ticket imported yet.</span>'
+    if latest_resolved_ticket:
+        ticket = render_ticket_link(latest_resolved_ticket["key"])
+        resolved_issue = (
+            f"""{ticket} <strong>{esc(short_text(latest_resolved_ticket['summary'], 140))}</strong>
+            <span class="muted">{esc(latest_resolved_ticket['status'])} · {esc(latest_resolved_ticket['updated'])}</span>"""
+        )
+    relationship_read = health_reason(signal_health)
+    positive_context = "Positive Slack/email signals are not classified yet; this will improve when the AI sync starts tagging appreciation, successful upgrades, quick customer confirmation, and quiet post-resolution periods."
+    return f"""<div class="status-panel relationship-context">
+      <strong>Relationship context</strong>
+      <dl class="facts">
+        <dt>Last topic discussed</dt><dd>{latest_topic}</dd>
+        <dt>Recently resolved</dt><dd>{resolved_issue}</dd>
+        <dt>Relationship read</dt><dd>{esc(relationship_read)}</dd>
+        <dt>Positive indicators</dt><dd><span class="muted">{esc(positive_context)}</span></dd>
+      </dl>
+    </div>"""
 
 
 def advisory_rows() -> list[sqlite3.Row]:
@@ -2194,6 +2252,16 @@ def page(title: str, body: str) -> bytes:
       padding: 12px;
       color: var(--muted);
     }}
+    .relationship-context {{
+      padding: 12px;
+    }}
+    .relationship-context .facts {{
+      margin: 12px 0 0;
+    }}
+    .relationship-context dd {{
+      display: grid;
+      gap: 3px;
+    }}
     .status-panel-actions {{
       display: flex;
       gap: 8px;
@@ -3774,6 +3842,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
       <p>{esc(customer['overview'])}</p>
       {f'<div class="status-panel"><strong>{len(advisory_matches)} relevant advisory(s)</strong><div class="stack">{advisory_items}</div></div>' if advisory_matches else ''}
       {signal_health_panel}
+      {render_relationship_context(cid, signal_health)}
       <dl class="facts">
         <dt>Health</dt><dd>{render_health_controls(customer['slug'], customer['health'], signal_health)}</dd>
         <dt>Status</dt><dd>{esc(customer['status'])}</dd>
