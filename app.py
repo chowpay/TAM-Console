@@ -2808,6 +2808,9 @@ def page(title: str, body: str) -> bytes:
         const headings = Array.from(table.tHead?.rows[0]?.cells || [])
           .map((cell) => (cell.textContent || "").replace(/[\\^v?]/g, "").trim().toLowerCase())
           .join("|");
+        if (table.matches("[data-ticket-table]")) {{
+          return `tam-console-column-widths:customer-tickets:${{headings}}`;
+        }}
         return `tam-console-column-widths:${{location.pathname}}:${{index}}:${{headings}}`;
       }}
       function applyColumnWidth(table, columnIndex, width) {{
