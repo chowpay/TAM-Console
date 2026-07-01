@@ -324,7 +324,26 @@ def relevant_advisories_for_customer(customer_id: int) -> list[tuple[sqlite3.Row
 
 def affected_customers_for_advisory(advisory: sqlite3.Row) -> list[tuple[sqlite3.Row, list[str]]]:
     matches = []
-    for customer in rows("select id, slug, name from customers order by is_pinned desc, name"):
+    customers = rows("select id, slug, name, aliases from customers order by is_pinned desc, name")
+    advisory_text = normalize_match(
+        " ".join(
+            [
+                advisory["title"],
+                advisory["body"],
+                advisory["relevance_terms"],
+            ]
+        )
+    )
+    explicit_customer_ids = set()
+    for customer in customers:
+        for name in [customer["name"], *parse_tags(customer["aliases"])]:
+            normalized_name = normalize_match(name)
+            if len(normalized_name) >= 3 and normalized_name in advisory_text:
+                explicit_customer_ids.add(customer["id"])
+                break
+    for customer in customers:
+        if explicit_customer_ids and customer["id"] not in explicit_customer_ids:
+            continue
         matched_terms = advisory_match_terms(advisory, customer_advisory_context(customer["id"]))
         if matched_terms:
             matches.append((customer, matched_terms))
@@ -1003,12 +1022,16 @@ def import_slack_records(text: str) -> str:
         return "No Slack JSON records found."
     ts = now_utc()
     signal_count = 0
+    skipped_signals = 0
     advisory_count = 0
     with db() as conn:
         for record in records:
             customer = find_customer_for_signal(record)
             summary = str(record.get("short_summary") or record.get("summary") or record.get("parent_summary") or "").strip()
             permalink = str(record.get("permalink") or record.get("source_url") or "").strip()
+            if permalink and conn.execute("select 1 from slack_signals where permalink = ?", (permalink,)).fetchone():
+                skipped_signals += 1
+                continue
             conn.execute(
                 """
                 insert into slack_signals
@@ -1059,7 +1082,10 @@ def import_slack_records(text: str) -> str:
                         ),
                     )
                     advisory_count += 1
-    return f"Imported {signal_count} Slack signal(s) and created {advisory_count} advisory record(s)."
+    return (
+        f"Imported {signal_count} Slack signal(s), skipped {skipped_signals} duplicate(s), "
+        f"and created {advisory_count} advisory record(s)."
+    )
 
 
 def load_atlassian_config():
