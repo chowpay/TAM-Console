@@ -2365,6 +2365,47 @@ def page(title: str, body: str) -> bytes:
     .segmented button:last-child {{ border-right: 0; }}
     .segmented button.active {{ background: var(--accent); color: var(--accent-ink); }}
     .filter-count {{ color: var(--muted); font-size: 13px; }}
+    .ticket-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 0 12px;
+    }}
+    .ticket-toolbar details {{
+      position: relative;
+    }}
+    .ticket-toolbar details > summary {{
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: var(--panel-2);
+      color: var(--ink);
+      cursor: pointer;
+    }}
+    .ticket-toolbar details[open] > form {{
+      position: absolute;
+      z-index: 5;
+      top: calc(100% + 8px);
+      left: 0;
+      width: min(720px, calc(100vw - 48px));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 12px 28px rgba(0, 0, 0, .28);
+    }}
+    .ticket-toolbar .actions,
+    .ticket-toolbar .filterbar {{
+      margin: 0;
+    }}
+    .ticket-toolbar .filterbar {{
+      flex: 1 1 520px;
+    }}
+    .ticket-toolbar .filterbar input {{
+      flex: 1 1 220px;
+      max-width: none;
+    }}
     .env-map {{ display: grid; gap: 8px; }}
     .check-row {{
       display: grid;
@@ -3970,32 +4011,35 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </section>""",
         "tickets": f"""<section class="section">
           <h3>Tickets</h3>
-          <details>
-            <summary>Add ticket</summary>
-            <form method="post" action="/customers/{esc(customer['slug'])}/tickets">
-              <div class="grid-2">
-                <label>Ticket key<input name="key" required placeholder="ESD-9106, CS-1234, FR-898, or MB-9904" pattern="^(ESD|CS|FR|MB)-[0-9]+$"></label>
-                <label>URL<input name="url" placeholder="https://tag.atlassian.net/browse/..."></label>
-                <label>Environment<select name="environment_id">{environment_options}</select></label>
-                <label>Status<input name="status"></label>
-                <label>Priority<input name="priority"></label>
-                <label>Assignee<input name="assignee"></label>
-                <label>Updated<input name="updated" placeholder="YYYY-MM-DD"></label>
-              </div>
-              <label>Summary<input name="summary"></label>
-              <label>Notes<textarea name="notes"></textarea></label>
-              <button type="submit">Save ticket</button>
-            </form>
-          </details>
-          <div class="actions">
-            <form method="post" action="/customers/{esc(customer['slug'])}/discover-jira">
-              <button type="submit">Discover Jira tickets</button>
-            </form>
-            <form method="post" action="/customers/{esc(customer['slug'])}/sync-jira">
-              <button type="submit">Sync existing Jira tickets</button>
-            </form>
+          <div class="ticket-toolbar">
+            <details>
+              <summary>Add ticket</summary>
+              <form method="post" action="/customers/{esc(customer['slug'])}/tickets">
+                <div class="grid-2">
+                  <label>Ticket key<input name="key" required placeholder="ESD-9106, CS-1234, FR-898, or MB-9904" pattern="^(ESD|CS|FR|MB)-[0-9]+$"></label>
+                  <label>URL<input name="url" placeholder="https://tag.atlassian.net/browse/..."></label>
+                  <label>Environment<select name="environment_id">{environment_options}</select></label>
+                  <label>Status<input name="status"></label>
+                  <label>Priority<input name="priority"></label>
+                  <label>Assignee<input name="assignee"></label>
+                  <label>Updated<input name="updated" placeholder="YYYY-MM-DD"></label>
+                </div>
+                <label>Title<input name="summary"></label>
+                <label>Notes<textarea name="notes"></textarea></label>
+                <button type="submit">Save ticket</button>
+              </form>
+            </details>
+            <div class="actions">
+              <form method="post" action="/customers/{esc(customer['slug'])}/discover-jira">
+                <button type="submit">Discover Jira tickets</button>
+              </form>
+              <form method="post" action="/customers/{esc(customer['slug'])}/sync-jira">
+                <button type="submit">Sync existing Jira tickets</button>
+              </form>
+            </div>
+            {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button><button type="button" data-ticket-filter="fr">FR</button><button type="button" data-ticket-filter="mb">MB</button></div><span id="ticket-filter-count" class="filter-count"></span></div>' if tickets else ''}
           </div>
-          {f'<div class="filterbar"><input id="ticket-search" type="search" placeholder="Search tickets"><div class="segmented"><button class="active" type="button" data-ticket-filter="all">All</button><button type="button" data-ticket-filter="esd">ESD</button><button type="button" data-ticket-filter="cs">CS</button><button type="button" data-ticket-filter="fr">FR</button><button type="button" data-ticket-filter="mb">MB</button></div><span id="ticket-filter-count" class="filter-count"></span></div><div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Title</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
+          {f'<div class="table-scroll"><table data-ticket-table><thead><tr><th>Key</th><th>Title</th><th>Environment</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Updated</th><th>Short summary</th><th>Synced</th></tr></thead><tbody>{ticket_rows}</tbody></table></div>' if tickets else '<div class="empty">No tickets linked yet.</div>'}
         </section>""",
         "staff": f"""<section class="section">
           <h3>Staff</h3>
