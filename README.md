@@ -145,6 +145,17 @@ and organization-based discovery. AI/Claude should be reserved for bounded
 summaries and messy-source extraction from Slack, email, Confluence, BOMs, and
 meeting notes.
 
+## Connector Pattern
+
+External sources should stay plugin-like:
+
+- `integrations/`: source-specific access, such as vid2kb SSH/run discovery
+- `extractors/`: raw evidence to reviewable TAM Console drafts
+- `docs/meeting-context-extraction.md`: required packet and AI output shape
+
+Connectors import raw evidence. Extractors produce drafts. TAM Console stores
+only reviewed customer facts.
+
 ## Agent Handoff
 
 For AI-assisted continuation, read these tracked project notes first:

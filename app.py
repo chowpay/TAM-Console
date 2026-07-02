@@ -6,9 +6,7 @@ import json
 import mimetypes
 import os
 import re
-import shlex
 import sqlite3
-import subprocess
 import sys
 import base64
 import importlib.util
@@ -18,6 +16,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+from extractors import meeting_intelligence
+from integrations import vid2kb
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -35,10 +36,6 @@ ALLOWED_FILE_ROOTS = (
     Path("/home/ubuntu/tag_inspect").resolve(),
     Path("/home/ubuntu/issues").resolve(),
 )
-VID2KB_HOST = os.environ.get("TAM_CONSOLE_VID2KB_HOST", "192.168.86.74")
-VID2KB_USER = os.environ.get("TAM_CONSOLE_VID2KB_USER", "ubuntu")
-VID2KB_KEY = Path(os.environ.get("TAM_CONSOLE_VID2KB_KEY", str(Path.home() / ".ssh" / "vid2kb_codex_ed25519")))
-VID2KB_OUTPUT_ROOT = "/home/ubuntu/vid2kb/video_manual_ingest/output"
 
 
 def now_utc() -> str:
@@ -114,33 +111,6 @@ def short_text(value: str, limit: int = 220) -> str:
     return text[: max(0, limit - 1)].rstrip() + "..."
 
 
-def clean_vid2kb_line(value: str) -> str:
-    text = value.strip().lstrip("-").strip()
-    text = re.sub(r"^`?\d{2}:\d{2}:\d{2}(?:\.\d+)?`?\s*", "", text)
-    text = re.sub(r"^speech:\s*", "", text, flags=re.IGNORECASE)
-    text = re.split(r"\s+\|\s+visual:\s+", text, maxsplit=1, flags=re.IGNORECASE)[0]
-    return short_text(text, 260)
-
-
-def compact_meeting_lines(lines: list[str], limit: int = 8) -> list[str]:
-    chunks = []
-    current = ""
-    for line in lines:
-        if not line:
-            continue
-        candidate = f"{current} {line}".strip() if current else line
-        if current and (len(candidate) > 220 or current.endswith((".", "?", "!"))):
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-        if len(chunks) >= limit:
-            break
-    if current and len(chunks) < limit:
-        chunks.append(current)
-    return chunks
-
-
 def render_meeting_text(value: str, compact: bool = False) -> str:
     text = (value or "").strip()
     if not text:
@@ -150,13 +120,13 @@ def render_meeting_text(value: str, compact: bool = False) -> str:
     bullets = []
     for line in lines:
         if line.startswith("- "):
-            cleaned = clean_vid2kb_line(line)
+            cleaned = meeting_intelligence.clean_vid2kb_line(line)
             if cleaned:
                 bullets.append(cleaned)
         else:
             intro.append(line)
     if compact:
-        bullets = compact_meeting_lines(bullets)
+        bullets = meeting_intelligence.compact_meeting_lines(bullets)
     intro_html = "".join(f"<p>{esc(short_text(line, 320))}</p>" for line in intro)
     bullet_html = ""
     if bullets:
@@ -164,120 +134,23 @@ def render_meeting_text(value: str, compact: bool = False) -> str:
     return f'<div class="meeting-text">{intro_html}{bullet_html}</div>'
 
 
-def vid2kb_run_is_safe(run_name: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", run_name or ""))
-
-
-def vid2kb_ssh(command: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "ssh",
-            "-i",
-            str(VID2KB_KEY),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            f"{VID2KB_USER}@{VID2KB_HOST}",
-            command,
-        ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
-
-
-def vid2kb_available_runs() -> list[str]:
-    if not VID2KB_KEY.exists():
-        return []
-    command = f"find {shlex.quote(VID2KB_OUTPUT_ROOT)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' | sort"
-    result = vid2kb_ssh(command, timeout=5)
-    if result.returncode != 0:
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if vid2kb_run_is_safe(line.strip())]
-
-
-def vid2kb_read_file(run_name: str, relative_path: str, max_bytes: int = 120000) -> str:
-    if not vid2kb_run_is_safe(run_name):
-        raise ValueError("Unsafe vid2kb run name.")
-    safe_relative = relative_path.strip("/")
-    command = (
-        f"cd {shlex.quote(VID2KB_OUTPUT_ROOT)} && "
-        f"test -f {shlex.quote(run_name + '/' + safe_relative)} && "
-        f"head -c {int(max_bytes)} {shlex.quote(run_name + '/' + safe_relative)}"
-    )
-    result = vid2kb_ssh(command, timeout=10)
-    if result.returncode != 0:
-        return ""
-    return result.stdout
-
-
-def vid2kb_run_date(run_name: str) -> str:
-    if not vid2kb_run_is_safe(run_name):
-        return now_utc()[:10]
-    command = (
-        f"stat -c '%y' {shlex.quote(VID2KB_OUTPUT_ROOT + '/' + run_name + '/docs_manifest.json')} "
-        f"2>/dev/null | cut -d' ' -f1"
-    )
-    result = vid2kb_ssh(command, timeout=5)
-    date_text = result.stdout.strip()
-    return date_text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text) else now_utc()[:10]
-
-
-def vid2kb_candidate_actions(transcript: str, limit: int = 12) -> list[str]:
-    candidates = []
-    patterns = ("action", "follow", "need", "needs", "issue", "problem", "question", "confirm", "verify", "check", "workaround", "todo")
-    for raw_line in transcript.splitlines():
-        line = raw_line.strip("- ").strip()
-        if not line or line.lower().startswith(("source video:", "provenance:")):
-            continue
-        if any(pattern in line.lower() for pattern in patterns):
-            candidates.append(clean_vid2kb_line(line))
-        if len(candidates) >= limit:
-            break
-    return candidates
-
-
-def vid2kb_overview_summary(overview: str, limit: int = 10) -> str:
-    lines = []
-    in_summary = False
-    for raw_line in overview.splitlines():
-        line = raw_line.strip()
-        if line.lower() == "## summary":
-            in_summary = True
-            continue
-        if in_summary and line.startswith("## "):
-            break
-        if in_summary and line.startswith("- "):
-            cleaned = clean_vid2kb_line(line)
-            if cleaned:
-                lines.append(cleaned)
-        if len(lines) >= limit:
-            break
-    if not lines:
-        lines = [clean_vid2kb_line(line) for line in overview.splitlines() if line.startswith("- ")][:limit]
-    return "Meeting draft from vid2kb. Review before saving as final account context.\n" + "\n".join(f"- {line}" for line in lines if line)
-
-
 def import_vid2kb_meeting(conn: sqlite3.Connection, customer_id: int, run_name: str, ts: str) -> str:
-    if not vid2kb_run_is_safe(run_name):
+    if not vid2kb.run_is_safe(run_name):
         return "Invalid vid2kb run name."
-    overview = vid2kb_read_file(run_name, "docs/overview.md")
-    transcript = vid2kb_read_file(run_name, "cleaned_transcript.md")
+    overview = vid2kb.read_file(run_name, "docs/overview.md")
+    transcript = vid2kb.read_file(run_name, "cleaned_transcript.md")
     if not overview and not transcript:
         return f"No readable vid2kb artifacts found for {run_name}."
-    meeting_date = vid2kb_run_date(run_name)
-    summary = vid2kb_overview_summary(overview or transcript)
-    action_candidates = vid2kb_candidate_actions(transcript)
+    meeting_date = vid2kb.run_date(run_name) or now_utc()[:10]
+    summary = meeting_intelligence.overview_summary(overview or transcript)
+    action_candidates = meeting_intelligence.candidate_actions(transcript)
     actions = (
         "AI review needed. Candidate follow-up lines from transcript:\n"
         + "\n".join(f"- {line}" for line in action_candidates)
         if action_candidates
         else "AI review needed. No deterministic action candidates found."
     )
-    source_root = f"ssh://{VID2KB_USER}@{VID2KB_HOST}{VID2KB_OUTPUT_ROOT}/{run_name}"
+    source_root = vid2kb.source_root(run_name)
     conn.execute(
         """
         insert into meetings
@@ -315,6 +188,128 @@ def import_vid2kb_meeting(conn: sqlite3.Connection, customer_id: int, run_name: 
         )
         added_artifacts += 1
     return f"Imported vid2kb run {run_name} as a meeting draft and linked {added_artifacts} artifact(s). Review the summary/actions before treating them as final."
+
+
+def vid2kb_run_from_url(url: str) -> str:
+    if "vid2kb" not in (url or "") or "/output/" not in (url or ""):
+        return ""
+    run_name = url.rstrip("/").rsplit("/", 1)[-1]
+    return run_name if vid2kb.run_is_safe(run_name) else ""
+
+
+def build_meeting_extraction_packet(customer_id: int, meeting_id: int) -> dict:
+    customer = row("select * from customers where id = ?", (customer_id,))
+    meeting = row("select * from meetings where id = ? and customer_id = ?", (meeting_id, customer_id))
+    if not customer or not meeting:
+        raise ValueError("Meeting not found.")
+    ticket_rows = rows(
+        """
+        select key, summary, status, priority, assignee, updated, notes
+        from tickets
+        where customer_id = ?
+        order by updated desc, key
+        limit 40
+        """,
+        (customer_id,),
+    )
+    environment_rows = rows(
+        """
+        select name, env_type, location, status, source_types, products, architecture, notes
+        from environments
+        where customer_id = ?
+        order by name
+        """,
+        (customer_id,),
+    )
+    staff_rows = rows(
+        """
+        select name, role, team, email, slack_handle, notes
+        from staff
+        where customer_id = ?
+        order by name
+        limit 40
+        """,
+        (customer_id,),
+    )
+    recent_note_rows = rows(
+        """
+        select note_type, title, body, source_url, created_at
+        from notes
+        where customer_id = ?
+        order by created_at desc
+        limit 12
+        """,
+        (customer_id,),
+    )
+    advisory_matches = [
+        {
+            "title": advisory["title"],
+            "severity": advisory["severity"],
+            "ticket_key": advisory["ticket_key"],
+            "matched_terms": matched_terms,
+        }
+        for advisory, matched_terms in relevant_advisories_for_customer(customer_id)
+    ]
+    run_name = vid2kb_run_from_url(meeting["url"])
+    vid2kb_evidence = {}
+    if run_name:
+        vid2kb_evidence = {
+            "run": run_name,
+            "overview": vid2kb.read_file(run_name, "docs/overview.md", max_bytes=40000),
+            "cleaned_transcript": vid2kb.read_file(run_name, "cleaned_transcript.md", max_bytes=65000),
+            "timeline": "Linked as a source artifact. Do not use visual OCR unless the transcript is insufficient.",
+        }
+    return {
+        "customer": {
+            "name": customer["name"],
+            "aliases": customer["aliases"],
+            "status": customer["status"],
+            "manual_health": customer["health"],
+            "owner": customer["owner"],
+            "products": customer["products"],
+            "overview": customer["overview"],
+            "architecture": customer["architecture"],
+        },
+        "meeting": {
+            "id": meeting["id"],
+            "date": meeting["meeting_date"],
+            "title": meeting["title"],
+            "attendees": meeting["attendees"],
+            "summary": meeting["summary"],
+            "actions": meeting["actions"],
+            "source_url": meeting["url"],
+        },
+        "tickets": [dict(ticket) for ticket in ticket_rows],
+        "environments": [dict(env) for env in environment_rows],
+        "staff": [dict(person) for person in staff_rows],
+        "recent_notes": [dict(note) for note in recent_note_rows],
+        "relevant_advisories": advisory_matches,
+        "vid2kb": vid2kb_evidence,
+    }
+
+
+def create_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meeting_id: int, ts: str) -> str:
+    packet = build_meeting_extraction_packet(customer_id, meeting_id)
+    prompt = meeting_intelligence.build_extraction_prompt(packet)
+    existing = conn.execute(
+        "select id from meeting_extractions where customer_id = ? and meeting_id = ? order by id desc limit 1",
+        (customer_id, meeting_id),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "update meeting_extractions set status = ?, prompt = ?, result = ?, updated_at = ? where id = ?",
+            ("Draft", prompt, "", ts, existing["id"]),
+        )
+        return "Rebuilt meeting extraction packet. Review it before applying any updates."
+    conn.execute(
+        """
+        insert into meeting_extractions
+          (customer_id, meeting_id, status, prompt, result, created_at, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (customer_id, meeting_id, "Draft", prompt, "", ts, ts),
+    )
+    return "Created meeting extraction packet. Review it before applying any updates."
 
 
 def render_tags(value: str) -> str:
@@ -944,6 +939,17 @@ def init_db() -> None:
               actions text default '',
               url text default '',
               created_at text not null
+            );
+
+            create table if not exists meeting_extractions (
+              id integer primary key,
+              customer_id integer not null references customers(id) on delete cascade,
+              meeting_id integer not null references meetings(id) on delete cascade,
+              status text default 'Draft',
+              prompt text default '',
+              result text default '',
+              created_at text not null,
+              updated_at text not null
             );
 
             create table if not exists notes (
@@ -2439,6 +2445,26 @@ def page(title: str, body: str) -> bytes:
       padding-top: 10px;
       border-top: 1px solid var(--line);
     }}
+    .meeting-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }}
+    .meeting-toolbar form {{
+      padding: 0;
+    }}
+    .meeting-extraction {{
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }}
+    .meeting-extraction textarea {{
+      min-height: 260px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }}
     .advisory-meta {{
       margin-top: 8px;
       border-top: 1px solid var(--line);
@@ -3849,6 +3875,18 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         """,
         (cid,),
     )
+    meeting_extraction_rows = rows(
+        """
+        select *
+        from meeting_extractions
+        where customer_id = ?
+        order by updated_at desc, id desc
+        """,
+        (cid,),
+    )
+    meeting_extractions_by_meeting = {}
+    for extraction in meeting_extraction_rows:
+        meeting_extractions_by_meeting.setdefault(extraction["meeting_id"], extraction)
     notes = rows(
         """
         select n.*, e.name as environment_name
@@ -3934,7 +3972,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     source_type_datalist = "".join(
         f'<option value="{esc(option)}"></option>' for option in SOURCE_TYPE_SUGGESTIONS
     )
-    vid2kb_runs = vid2kb_available_runs()
+    vid2kb_runs = vid2kb.available_runs()
     vid2kb_run_options = "".join(f'<option value="{esc(run_name)}">{esc(run_name)}</option>' for run_name in vid2kb_runs)
     customer_status_options = ("Active", "Imported", "Watching", "Inactive", "Archived")
     def customer_status_select(selected: str = "") -> str:
@@ -4010,16 +4048,31 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </tr>"""
         for t in tickets
     )
-    meeting_items = "".join(
-        f"""<article class="item">
+    def render_meeting_item(m: sqlite3.Row) -> str:
+        extraction = meeting_extractions_by_meeting.get(m["id"])
+        extraction_panel = ""
+        if extraction:
+            extraction_panel = f"""<details class="meeting-extraction">
+              <summary>Extraction packet ready · {esc(extraction['updated_at'])}</summary>
+              <p class="muted">Copy this packet into Claude/Codex or a future API extractor. Treat the result as a draft until reviewed.</p>
+              <textarea readonly>{esc(extraction['prompt'])}</textarea>
+            </details>"""
+        return f"""<article class="item">
           <strong>{esc(m['meeting_date'])} · {esc(m['title'])}</strong>
           <p class="muted">{esc(m['environment_name']) or 'Customer-wide'} · {esc(m['attendees'])}</p>
           {render_meeting_text(m['summary'], compact=True)}
           <div class="meeting-actions"><strong>Review candidates</strong>{render_meeting_text(m['actions'])}</div>
-          {f'<a href="{esc(m["url"])}" target="_blank">source</a>' if m['url'] else ''}
+          <div class="meeting-toolbar">
+            {f'<a href="{esc(m["url"])}" target="_blank">source</a>' if m['url'] else ''}
+            <form method="post" action="/customers/{esc(customer['slug'])}/meeting-extract">
+              <input type="hidden" name="meeting_id" value="{m['id']}">
+              <button type="submit">Extract highlights</button>
+            </form>
+          </div>
+          {extraction_panel}
         </article>"""
-        for m in meetings
-    )
+
+    meeting_items = "".join(render_meeting_item(m) for m in meetings)
     note_items = "".join(
         f"""<article class="item">
           <span class="tag">{esc(n['note_type'])}</span>
@@ -5072,6 +5125,10 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "vid2kb-import":
                 message = import_vid2kb_meeting(conn, cid, data.get("run_name", ""), ts)
                 redirect_section = "meetings"
+            elif action == "meeting-extract":
+                meeting_id = int(data.get("meeting_id", "0") or "0")
+                message = create_meeting_extraction(conn, cid, meeting_id, ts)
+                redirect_section = "meetings"
             elif action == "notes":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
                 conn.execute(
@@ -5121,6 +5178,7 @@ class Handler(BaseHTTPRequestHandler):
             "software": "software",
             "meetings": "meetings",
             "vid2kb-import": "meetings",
+            "meeting-extract": "meetings",
             "notes": "notes",
             "artifacts": "artifacts",
         }.get(action, "overview")
