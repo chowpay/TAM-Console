@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 from extractors import meeting_intelligence
-from integrations import vid2kb
+from integrations import claude_cli, vid2kb
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -310,6 +310,26 @@ def create_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meetin
         (customer_id, meeting_id, "Draft", prompt, "", ts, ts),
     )
     return "Created meeting extraction packet. Review it before applying any updates."
+
+
+def run_claude_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meeting_id: int, ts: str) -> str:
+    create_meeting_extraction(conn, customer_id, meeting_id, ts)
+    extraction = conn.execute(
+        "select id, prompt from meeting_extractions where customer_id = ? and meeting_id = ? order by id desc limit 1",
+        (customer_id, meeting_id),
+    ).fetchone()
+    if not extraction or not extraction["prompt"]:
+        return "No extraction packet was available for Claude."
+
+    ok, result = claude_cli.run_meeting_extraction(extraction["prompt"])
+    status = "Claude Draft" if ok else "Claude Error"
+    conn.execute(
+        "update meeting_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+        (status, result, ts, extraction["id"]),
+    )
+    if ok:
+        return "Claude extraction complete. Review the JSON draft before applying it to the meeting."
+    return result
 
 
 def render_tags(value: str) -> str:
@@ -2455,15 +2475,20 @@ def page(title: str, body: str) -> bytes:
     .meeting-toolbar form {{
       padding: 0;
     }}
-    .meeting-extraction {{
+    .meeting-extraction,
+    .meeting-extraction-result {{
       margin-top: 10px;
       border-top: 1px solid var(--line);
       padding-top: 10px;
     }}
-    .meeting-extraction textarea {{
+    .meeting-extraction textarea,
+    .meeting-extraction-result textarea {{
       min-height: 260px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
+    }}
+    .meeting-extraction-result textarea {{
+      min-height: 180px;
     }}
     .advisory-meta {{
       margin-top: 8px;
@@ -4052,11 +4077,19 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         extraction = meeting_extractions_by_meeting.get(m["id"])
         extraction_panel = ""
         if extraction:
+            claude_result_panel = ""
+            if extraction["result"]:
+                claude_result_panel = f"""<details class="meeting-extraction-result" open>
+                  <summary>Claude draft · {esc(extraction['status'])}</summary>
+                  <p class="muted">Review this JSON before applying it to the meeting, tickets, staff, or account health.</p>
+                  <textarea readonly>{esc(extraction['result'])}</textarea>
+                </details>"""
             extraction_panel = f"""<details class="meeting-extraction">
               <summary>Extraction packet ready · {esc(extraction['updated_at'])}</summary>
-              <p class="muted">Copy this packet into Claude/Codex or a future API extractor. Treat the result as a draft until reviewed.</p>
+              <p class="muted">This is the exact packet sent to Claude. It is kept here for review and debugging.</p>
               <textarea readonly>{esc(extraction['prompt'])}</textarea>
-            </details>"""
+            </details>
+            {claude_result_panel}"""
         return f"""<article class="item">
           <strong>{esc(m['meeting_date'])} · {esc(m['title'])}</strong>
           <p class="muted">{esc(m['environment_name']) or 'Customer-wide'} · {esc(m['attendees'])}</p>
@@ -4067,6 +4100,10 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <form method="post" action="/customers/{esc(customer['slug'])}/meeting-extract">
               <input type="hidden" name="meeting_id" value="{m['id']}">
               <button type="submit">Extract highlights</button>
+            </form>
+            <form method="post" action="/customers/{esc(customer['slug'])}/meeting-extract-claude">
+              <input type="hidden" name="meeting_id" value="{m['id']}">
+              <button type="submit">Run Claude extraction</button>
             </form>
           </div>
           {extraction_panel}
@@ -5129,6 +5166,10 @@ class Handler(BaseHTTPRequestHandler):
                 meeting_id = int(data.get("meeting_id", "0") or "0")
                 message = create_meeting_extraction(conn, cid, meeting_id, ts)
                 redirect_section = "meetings"
+            elif action == "meeting-extract-claude":
+                meeting_id = int(data.get("meeting_id", "0") or "0")
+                message = run_claude_meeting_extraction(conn, cid, meeting_id, ts)
+                redirect_section = "meetings"
             elif action == "notes":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
                 conn.execute(
@@ -5179,6 +5220,7 @@ class Handler(BaseHTTPRequestHandler):
             "meetings": "meetings",
             "vid2kb-import": "meetings",
             "meeting-extract": "meetings",
+            "meeting-extract-claude": "meetings",
             "notes": "notes",
             "artifacts": "artifacts",
         }.get(action, "overview")
