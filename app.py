@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import base64
 import importlib.util
+import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +37,8 @@ ALLOWED_FILE_ROOTS = (
     Path("/home/ubuntu/tag_inspect").resolve(),
     Path("/home/ubuntu/issues").resolve(),
 )
+CLAUDE_EXTRACTION_JOBS: set[str] = set()
+CLAUDE_EXTRACTION_LOCK = threading.Lock()
 
 
 def now_utc() -> str:
@@ -312,7 +315,39 @@ def create_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meetin
     return "Created meeting extraction packet. Review it before applying any updates."
 
 
-def run_claude_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meeting_id: int, ts: str) -> str:
+def _run_claude_meeting_extraction_job(customer_id: int, meeting_id: int, extraction_id: int, job_key: str) -> None:
+    try:
+        with db() as conn:
+            extraction = conn.execute(
+                "select prompt from meeting_extractions where id = ? and customer_id = ? and meeting_id = ?",
+                (extraction_id, customer_id, meeting_id),
+            ).fetchone()
+        if not extraction or not extraction["prompt"]:
+            status, result = "Claude Error", "No extraction packet was available for Claude."
+        else:
+            status_ok, result = claude_cli.run_meeting_extraction(extraction["prompt"])
+            status = "Claude Draft" if status_ok else "Claude Error"
+        with db() as conn:
+            conn.execute(
+                "update meeting_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+                (status, result, now_utc(), extraction_id),
+            )
+    except Exception as exc:
+        with db() as conn:
+            conn.execute(
+                "update meeting_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+                ("Claude Error", f"Claude extraction worker failed: {exc}", now_utc(), extraction_id),
+            )
+    finally:
+        with CLAUDE_EXTRACTION_LOCK:
+            CLAUDE_EXTRACTION_JOBS.discard(job_key)
+
+
+def queue_claude_meeting_extraction(conn: sqlite3.Connection, customer_id: int, meeting_id: int, ts: str) -> str:
+    job_key = f"{customer_id}:{meeting_id}"
+    with CLAUDE_EXTRACTION_LOCK:
+        if job_key in CLAUDE_EXTRACTION_JOBS:
+            return "Claude extraction is already running for this meeting."
     create_meeting_extraction(conn, customer_id, meeting_id, ts)
     extraction = conn.execute(
         "select id, prompt from meeting_extractions where customer_id = ? and meeting_id = ? order by id desc limit 1",
@@ -321,15 +356,20 @@ def run_claude_meeting_extraction(conn: sqlite3.Connection, customer_id: int, me
     if not extraction or not extraction["prompt"]:
         return "No extraction packet was available for Claude."
 
-    ok, result = claude_cli.run_meeting_extraction(extraction["prompt"])
-    status = "Claude Draft" if ok else "Claude Error"
+    with CLAUDE_EXTRACTION_LOCK:
+        CLAUDE_EXTRACTION_JOBS.add(job_key)
     conn.execute(
         "update meeting_extractions set status = ?, result = ?, updated_at = ? where id = ?",
-        (status, result, ts, extraction["id"]),
+        ("Claude Running", "", ts, extraction["id"]),
     )
-    if ok:
-        return "Claude extraction complete. Review the JSON draft before applying it to the meeting."
-    return result
+    conn.commit()
+    worker = threading.Thread(
+        target=_run_claude_meeting_extraction_job,
+        args=(customer_id, meeting_id, extraction["id"], job_key),
+        daemon=True,
+    )
+    worker.start()
+    return "Claude extraction started in the background. Refresh this meeting page to see when the draft is ready."
 
 
 def render_tags(value: str) -> str:
@@ -4076,7 +4116,14 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     def render_meeting_item(m: sqlite3.Row) -> str:
         extraction = meeting_extractions_by_meeting.get(m["id"])
         extraction_panel = ""
+        claude_button_label = "Run Claude extraction"
+        claude_button_attrs = ""
         if extraction:
+            if extraction["status"] == "Claude Running":
+                claude_button_label = "Claude running"
+                claude_button_attrs = " disabled"
+            elif extraction["result"]:
+                claude_button_label = "Re-run Claude extraction"
             claude_result_panel = ""
             if extraction["result"]:
                 claude_result_panel = f"""<details class="meeting-extraction-result" open>
@@ -4103,7 +4150,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             </form>
             <form method="post" action="/customers/{esc(customer['slug'])}/meeting-extract-claude">
               <input type="hidden" name="meeting_id" value="{m['id']}">
-              <button type="submit">Run Claude extraction</button>
+              <button type="submit"{claude_button_attrs}>{claude_button_label}</button>
             </form>
           </div>
           {extraction_panel}
@@ -5168,7 +5215,7 @@ class Handler(BaseHTTPRequestHandler):
                 redirect_section = "meetings"
             elif action == "meeting-extract-claude":
                 meeting_id = int(data.get("meeting_id", "0") or "0")
-                message = run_claude_meeting_extraction(conn, cid, meeting_id, ts)
+                message = queue_claude_meeting_extraction(conn, cid, meeting_id, ts)
                 redirect_section = "meetings"
             elif action == "notes":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None

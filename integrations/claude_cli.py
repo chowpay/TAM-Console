@@ -6,7 +6,19 @@ from pathlib import Path
 
 
 CLAUDE_CLI = Path(os.environ.get("TAM_CONSOLE_CLAUDE_CLI", "/usr/local/bin/claude-worker-cli"))
-DEFAULT_TIMEOUT = int(os.environ.get("TAM_CONSOLE_CLAUDE_TIMEOUT", "240"))
+DEFAULT_TIMEOUT = int(os.environ.get("TAM_CONSOLE_CLAUDE_TIMEOUT", "900"))
+
+
+def normalize_json_output(value: str) -> str:
+    text = (value or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def run_meeting_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
@@ -48,7 +60,7 @@ def run_meeting_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple
     except OSError as exc:
         return False, f"Claude extraction could not start: {exc}"
 
-    output = (result.stdout or "").strip()
+    output = normalize_json_output(result.stdout or "")
     if result.returncode != 0:
         error = (result.stderr or output or "Unknown Claude CLI error.").strip()
         return False, f"Claude extraction failed: {error}"
