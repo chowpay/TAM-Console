@@ -1528,6 +1528,7 @@ def init_db() -> None:
         ts = now_utc()
         for key, value in {
             "jira_sync_projects": "ESD, CS, FR, MB",
+            "jira_customer_routing_fields": "customfield_10002, customfield_10152",
             "jira_sync_include_assignee": "1",
             "jira_sync_include_reporter": "1",
         }.items():
@@ -1698,6 +1699,26 @@ def jira_sync_projects_from_text(value: str) -> list[str]:
 
 def jira_sync_projects() -> list[str]:
     return jira_sync_projects_from_text(app_setting("jira_sync_projects", "ESD, CS, FR, MB"))
+
+
+def jira_customer_routing_fields_from_text(value: str) -> list[str]:
+    fields = []
+    seen = set()
+    for raw in re.split(r"[,;\s]+", value or ""):
+        field = raw.strip()
+        if not re.fullmatch(r"customfield_\d+", field):
+            continue
+        if field in seen:
+            continue
+        seen.add(field)
+        fields.append(field)
+    return fields or ["customfield_10002", "customfield_10152"]
+
+
+def jira_customer_routing_fields() -> list[str]:
+    return jira_customer_routing_fields_from_text(
+        app_setting("jira_customer_routing_fields", "customfield_10002, customfield_10152")
+    )
 
 
 def jira_sync_ownership_clause() -> str:
@@ -2085,7 +2106,7 @@ def jira_request(path: str, payload: dict | None = None) -> dict:
 
 
 def jira_get_issue(issue_key: str) -> dict:
-    fields = ",".join(["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"])
+    fields = ",".join(["summary", "description", "status", "priority", "assignee", "reporter", "updated", *jira_customer_routing_fields()])
     try:
         return jira_request(f"/rest/api/3/issue/{quote(issue_key)}?fields={quote(fields)}")
     except RuntimeError as exc:
@@ -2114,7 +2135,7 @@ def chunks(values: list[str], size: int) -> list[list[str]]:
 
 
 def jira_get_issues_by_keys(issue_keys: list[str]) -> list[dict]:
-    fields = ["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"]
+    fields = ["summary", "description", "status", "priority", "assignee", "reporter", "updated", *jira_customer_routing_fields()]
     issues = []
     seen = set()
     clean_keys = []
@@ -2230,6 +2251,53 @@ def upsert_ticket_items(customer_id: int, items: list[dict]) -> int:
         return upsert_ticket_items_with_conn(conn, customer_id, items, ts)
 
 
+def jira_field_text_values(value: object) -> list[str]:
+    values = []
+    if value is None:
+        return values
+    if isinstance(value, str):
+        values.append(value)
+    elif isinstance(value, (int, float)):
+        values.append(str(value))
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(jira_field_text_values(item))
+    elif isinstance(value, dict):
+        for key in ("name", "value", "displayName", "accountName", "label", "title"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                values.append(text)
+                break
+    clean_values = []
+    seen = set()
+    for raw in values:
+        text = " ".join(str(raw or "").split())
+        normalized = normalize_match(text)
+        if not text or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        clean_values.append(text)
+    return clean_values
+
+
+def jira_issue_customer_orgs(issue: dict) -> tuple[list[dict], str]:
+    fields = issue.get("fields", {})
+    for field_id in jira_customer_routing_fields():
+        value = fields.get(field_id)
+        orgs = []
+        if field_id == "customfield_10002":
+            raw_orgs = value if isinstance(value, list) else []
+            for org in raw_orgs:
+                if isinstance(org, dict) and str(org.get("name", "") or "").strip():
+                    orgs.append(org)
+        else:
+            for text in jira_field_text_values(value):
+                orgs.append({"id": "", "name": text, "source_field": field_id})
+        if orgs:
+            return orgs, field_id
+    return [], ""
+
+
 def discover_jira_tickets(customer_id: int) -> str:
     customer = row("select name, aliases from customers where id = ?", (customer_id,))
     orgs = rows(
@@ -2320,7 +2388,7 @@ def sync_jira_ticket_keys(customer_id: int, keys: list[str], ts: str | None = No
         stats["errors"].append(f"missing from Jira: {', '.join(missing_keys[:10])}")  # type: ignore[union-attr]
     for issue in issues:
         item = issue_to_ticket_item(issue)
-        orgs = issue.get("fields", {}).get("customfield_10002") or []
+        orgs, route_field = jira_issue_customer_orgs(issue)
         if not orgs:
             items_for_current.append(item)
             stats["kept_without_org"] += 1  # type: ignore[operator]
@@ -2328,13 +2396,18 @@ def sync_jira_ticket_keys(customer_id: int, keys: list[str], ts: str | None = No
         with db() as conn:
             target_customer_ids = set()
             for org in orgs:
-                target_customer_id = find_or_create_customer_for_org(conn, org, ts)
+                target_customer_id = find_or_create_customer_for_org(
+                    conn,
+                    org,
+                    ts,
+                    f"ticket-sync:{route_field}",
+                )
                 target_customer_ids.add(target_customer_id)
                 upsert_ticket_items_with_conn(conn, target_customer_id, [item], ts)
             if customer_id not in target_customer_ids:
                 conn.execute(
                     "delete from tickets where customer_id = ? and key = ?",
-                    (customer_id, key),
+                    (customer_id, item.get("key", "")),
                 )
                 stats["moved"] += 1  # type: ignore[operator]
             stats["refreshed"] += 1  # type: ignore[operator]
@@ -2379,7 +2452,12 @@ def unique_customer_slug(conn: sqlite3.Connection, name: str) -> str:
     return slug
 
 
-def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str) -> int:
+def find_or_create_customer_for_org(
+    conn: sqlite3.Connection,
+    org: dict,
+    ts: str,
+    match_source: str = "assigned-ticket-import",
+) -> int:
     org_id = str(org.get("id", "") or "")
     org_name = str(org.get("name", "") or "").strip()
     normalized = normalize_match(org_name)
@@ -2408,7 +2486,7 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
             conn.execute(
                 """
                 insert into customers (slug, name, status, overview, created_at, updated_at)
-                values (?, ?, 'Imported', 'Imported from assigned Jira issue Organizations.', ?, ?)
+                values (?, ?, 'Imported', 'Imported from assigned Jira issue routing.', ?, ?)
                 """,
                 (slug, org_name, ts, ts),
             )
@@ -2419,7 +2497,7 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
             """
             insert into customer_jira_organizations
               (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
-            values (?, ?, ?, ?, ?, 'assigned-ticket-import', ?)
+            values (?, ?, ?, ?, ?, ?, ?)
             on conflict(customer_id, organization_id) where organization_id != '' do update set
               organization_uuid = excluded.organization_uuid,
               organization_name = excluded.organization_name,
@@ -2432,6 +2510,7 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
                 str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
                 org_name,
                 normalized,
+                match_source,
                 ts,
             ),
         )
@@ -2440,7 +2519,7 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
             """
             insert into customer_jira_organizations
               (customer_id, organization_id, organization_uuid, organization_name, normalized_name, match_source, created_at)
-            values (?, '', ?, ?, ?, 'assigned-ticket-import', ?)
+            values (?, '', ?, ?, ?, ?, ?)
             on conflict(customer_id, normalized_name) where organization_id = '' do update set
               organization_uuid = excluded.organization_uuid,
               organization_name = excluded.organization_name,
@@ -2451,6 +2530,7 @@ def find_or_create_customer_for_org(conn: sqlite3.Connection, org: dict, ts: str
                 str(org.get("uuid", "") or org.get("_links", {}).get("self", "") or ""),
                 org_name,
                 normalized,
+                match_source,
                 ts,
             ),
         )
@@ -2463,12 +2543,13 @@ def import_assigned_jira_tickets() -> str:
     before_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
     projects = jira_sync_projects()
     jql = f"{jira_sync_ownership_clause()} AND project in ({', '.join(projects)}) ORDER BY updated DESC"
+    routing_fields = jira_customer_routing_fields()
     issues = []
     next_token = None
     while True:
         payload = {
             "jql": jql,
-            "fields": ["summary", "description", "status", "priority", "assignee", "reporter", "updated", "customfield_10002"],
+            "fields": ["summary", "description", "status", "priority", "assignee", "reporter", "updated", *routing_fields],
             "maxResults": 100,
         }
         if next_token:
@@ -2482,11 +2563,12 @@ def import_assigned_jira_tickets() -> str:
     ts = now_utc()
     imported_keys = set()
     org_ids = set()
+    routing_hits = {}
     queued_no_org = 0
     with db() as conn:
         for issue in issues:
             item = issue_to_ticket_item(issue)
-            orgs = issue.get("fields", {}).get("customfield_10002") or []
+            orgs, route_field = jira_issue_customer_orgs(issue)
             if not orgs:
                 existing_links = conn.execute(
                     "select distinct customer_id from tickets where key = ?",
@@ -2501,8 +2583,14 @@ def import_assigned_jira_tickets() -> str:
                     queued_no_org += 1
                 continue
             for org in orgs:
-                customer_id = find_or_create_customer_for_org(conn, org, ts)
+                customer_id = find_or_create_customer_for_org(
+                    conn,
+                    org,
+                    ts,
+                    f"assigned-ticket-import:{route_field}",
+                )
                 org_ids.add(str(org.get("id", "") or org.get("name", "")))
+                routing_hits[route_field] = routing_hits.get(route_field, 0) + 1
                 upsert_ticket_items_with_conn(conn, customer_id, [item], ts)
                 imported_keys.add(f"{customer_id}:{item.get('key', '')}")
 
@@ -2510,9 +2598,10 @@ def import_assigned_jira_tickets() -> str:
     after_customers = row("select count(*) as n from customers")["n"]
     after_orgs = row("select count(*) as n from customer_jira_organizations")["n"]
     return (
-        f"Processed {len(imported_keys)} Jira-owned ticket link(s) across {len(org_ids)} Jira organization(s). "
+        f"Processed {len(imported_keys)} Jira-owned ticket link(s) across {len(org_ids)} Jira routing value(s). "
         f"Added {after_tickets - before_tickets} ticket link(s), "
         f"{after_customers - before_customers} customer(s), and {after_orgs - before_orgs} org mapping(s). "
+        f"Routing fields used: {', '.join(f'{field}={count}' for field, count in sorted(routing_hits.items())) or 'none'}. "
         f"Queued {queued_no_org} ticket(s) with no Organization for manual mapping."
     )
 
@@ -4318,6 +4407,7 @@ def render_settings(message: str = "") -> bytes:
     include_assignee = app_setting("jira_sync_include_assignee", "1") == "1"
     include_reporter = app_setting("jira_sync_include_reporter", "1") == "1"
     projects = app_setting("jira_sync_projects", "ESD, CS, FR, MB")
+    routing_fields = app_setting("jira_customer_routing_fields", "customfield_10002, customfield_10152")
     body = f"""<div class="layout">
   {render_sidebar()}
   <div class="stack">
@@ -4329,6 +4419,10 @@ def render_settings(message: str = "") -> bytes:
         <label>Projects
           <input name="jira_sync_projects" value="{esc(projects)}" placeholder="ESD, CS, FR, MB">
         </label>
+        <label>Customer routing fields
+          <input name="jira_customer_routing_fields" value="{esc(routing_fields)}" placeholder="customfield_10002, customfield_10152">
+        </label>
+        <p class="muted">Ordered Jira custom fields used to map synced tickets to TAM customers. Put the standard Organizations field first, or put an account/customer-name field first if that is the cleaner source for a project.</p>
         <label class="check-row">
           <input type="checkbox" name="jira_sync_include_assignee" value="1"{' checked' if include_assignee else ''}>
           <span>Include tickets assigned to me</span>
@@ -5169,8 +5263,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/settings":
             projects = ", ".join(jira_sync_projects_from_text(data.get("jira_sync_projects", "")))
+            routing_fields = ", ".join(jira_customer_routing_fields_from_text(data.get("jira_customer_routing_fields", "")))
             with db() as conn:
                 set_app_setting(conn, "jira_sync_projects", projects or "ESD, CS, FR, MB", ts)
+                set_app_setting(conn, "jira_customer_routing_fields", routing_fields or "customfield_10002, customfield_10152", ts)
                 set_app_setting(conn, "jira_sync_include_assignee", "1" if data.get("jira_sync_include_assignee") == "1" else "0", ts)
                 set_app_setting(conn, "jira_sync_include_reporter", "1" if data.get("jira_sync_include_reporter") == "1" else "0", ts)
             self.send_html(render_settings("Jira sync settings updated."))
