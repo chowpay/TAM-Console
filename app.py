@@ -24,6 +24,23 @@ from extractors import document_intelligence, meeting_intelligence
 from integrations import claude_cli, vid2kb
 
 ROOT = Path(__file__).resolve().parent
+
+
+def load_dotenv(path: Path = ROOT / ".env") -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "casefiles.db"
 UPLOAD_ROOT = DATA_DIR / "artifacts"

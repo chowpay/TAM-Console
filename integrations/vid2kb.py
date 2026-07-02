@@ -4,16 +4,16 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class Vid2KBConfig:
-    host: str = os.environ.get("TAM_CONSOLE_VID2KB_HOST", "192.168.86.74")
-    user: str = os.environ.get("TAM_CONSOLE_VID2KB_USER", "ubuntu")
-    key: Path = Path(os.environ.get("TAM_CONSOLE_VID2KB_KEY", str(Path.home() / ".ssh" / "vid2kb_codex_ed25519")))
-    output_root: str = os.environ.get("TAM_CONSOLE_VID2KB_OUTPUT_ROOT", "/home/ubuntu/vid2kb/video_manual_ingest/output")
+    host: str = field(default_factory=lambda: os.environ.get("TAM_CONSOLE_VID2KB_HOST", ""))
+    user: str = field(default_factory=lambda: os.environ.get("TAM_CONSOLE_VID2KB_USER", ""))
+    key: Path = field(default_factory=lambda: Path(os.environ.get("TAM_CONSOLE_VID2KB_KEY", "")))
+    output_root: str = field(default_factory=lambda: os.environ.get("TAM_CONSOLE_VID2KB_OUTPUT_ROOT", ""))
 
 
 def run_is_safe(run_name: str) -> bool:
@@ -44,7 +44,7 @@ def ssh(command: str, config: Vid2KBConfig | None = None, timeout: int = 10) -> 
 
 def available_runs(config: Vid2KBConfig | None = None) -> list[str]:
     cfg = config or Vid2KBConfig()
-    if not cfg.key.exists():
+    if not cfg.host or not cfg.user or not cfg.output_root or not cfg.key.exists():
         return []
     command = f"find {shlex.quote(cfg.output_root)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' | sort"
     result = ssh(command, cfg, timeout=5)
@@ -55,6 +55,8 @@ def available_runs(config: Vid2KBConfig | None = None) -> list[str]:
 
 def read_file(run_name: str, relative_path: str, max_bytes: int = 120000, config: Vid2KBConfig | None = None) -> str:
     cfg = config or Vid2KBConfig()
+    if not cfg.host or not cfg.user or not cfg.output_root or not cfg.key.exists():
+        return ""
     if not run_is_safe(run_name):
         raise ValueError("Unsafe vid2kb run name.")
     safe_relative = relative_path.strip("/")
@@ -72,6 +74,8 @@ def read_file(run_name: str, relative_path: str, max_bytes: int = 120000, config
 
 def run_date(run_name: str, config: Vid2KBConfig | None = None) -> str:
     cfg = config or Vid2KBConfig()
+    if not cfg.host or not cfg.user or not cfg.output_root or not cfg.key.exists():
+        return ""
     if not run_is_safe(run_name):
         return ""
     manifest = f"{cfg.output_root}/{run_name}/docs_manifest.json"
@@ -83,4 +87,6 @@ def run_date(run_name: str, config: Vid2KBConfig | None = None) -> str:
 
 def source_root(run_name: str, config: Vid2KBConfig | None = None) -> str:
     cfg = config or Vid2KBConfig()
+    if not cfg.host or not cfg.user or not cfg.output_root:
+        return ""
     return f"ssh://{cfg.user}@{cfg.host}{cfg.output_root}/{run_name}"

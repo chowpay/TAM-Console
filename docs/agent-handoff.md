@@ -27,7 +27,7 @@ The current implementation is a single Python standard-library web app:
 - App: `app.py`
 - Local database: `data/casefiles.db`
 - Default URL: `http://127.0.0.1:8787`
-- Current lab URL: `http://192.168.86.20:8787`
+- Current lab URL: use the local deployment host and configured `CASEFILES_PORT`.
 - Public repo: `https://github.com/chowpay/TAM-Console.git`
 
 The app is intended to be public-safe code. Real customer data must stay out of
