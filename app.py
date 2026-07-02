@@ -137,6 +137,91 @@ def render_meeting_text(value: str, compact: bool = False) -> str:
     return f'<div class="meeting-text">{intro_html}{bullet_html}</div>'
 
 
+def parse_claude_json_result(value: str) -> dict:
+    text = (value or "").strip()
+    if not text:
+        return {}
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def render_json_list(items: object, title_key: str = "title", body_key: str = "summary", limit: int = 8) -> str:
+    if not isinstance(items, list) or not items:
+        return ""
+    rows_html = []
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            title = item.get(title_key) or item.get("task") or item.get("decision") or item.get("question") or item.get("risk") or item.get("request") or item.get("key") or "Item"
+            body = item.get(body_key) or item.get("details") or item.get("relevance") or item.get("severity") or ""
+            meta = []
+            for key in ("owner", "due_date", "priority", "linked_tickets"):
+                value = item.get(key)
+                if isinstance(value, list):
+                    value = ", ".join(str(v) for v in value if v)
+                if value:
+                    meta.append(f"{key.replace('_', ' ').title()}: {value}")
+            rows_html.append(
+                f"""<li>
+                  <strong>{esc(title)}</strong>
+                  {f'<p>{esc(body)}</p>' if body else ''}
+                  {f'<p class="muted">{esc(" · ".join(meta))}</p>' if meta else ''}
+                </li>"""
+            )
+        else:
+            rows_html.append(f"<li>{esc(item)}</li>")
+    return "<ul>" + "".join(rows_html) + "</ul>"
+
+
+def render_claude_meeting_brief(result: str) -> str:
+    data = parse_claude_json_result(result)
+    if not data:
+        return '<p class="muted">Claude returned text that could not be parsed as JSON. Use the Raw JSON tab below.</p>'
+
+    sections = []
+    health = data.get("health_impact")
+    health_reasoning = data.get("health_reasoning")
+    if health or health_reasoning:
+        sections.append(
+            f"""<section class="meeting-brief-section meeting-brief-health">
+              <h4>Health impact</h4>
+              <p>{health_badge(str(health or 'Unknown'))}</p>
+              {f'<p>{esc(health_reasoning)}</p>' if health_reasoning else ''}
+            </section>"""
+        )
+    section_defs = (
+        ("Topics", "topics", "title", "summary"),
+        ("Decisions", "decisions", "decision", ""),
+        ("Action items", "action_items", "task", ""),
+        ("Open questions", "open_questions", "question", ""),
+        ("Risks", "risks", "risk", "severity"),
+        ("Customer requests", "customer_requests", "request", "priority"),
+        ("Environment references", "environment_references", "name", "details"),
+        ("Ticket references", "ticket_references", "key", "relevance"),
+    )
+    for heading, key, title_key, body_key in section_defs:
+        body = render_json_list(data.get(key), title_key, body_key)
+        if body:
+            sections.append(
+                f"""<section class="meeting-brief-section">
+                  <h4>{esc(heading)}</h4>
+                  {body}
+                </section>"""
+            )
+    if not sections:
+        return '<p class="muted">No structured meeting brief fields were returned.</p>'
+    return '<div class="meeting-brief">' + "".join(sections) + "</div>"
+
+
 def import_vid2kb_meeting(conn: sqlite3.Connection, customer_id: int, run_name: str, ts: str) -> str:
     if not vid2kb.run_is_safe(run_name):
         return "Invalid vid2kb run name."
@@ -2530,6 +2615,40 @@ def page(title: str, body: str) -> bytes:
     .meeting-extraction-result textarea {{
       min-height: 180px;
     }}
+    .meeting-brief {{
+      display: grid;
+      gap: 14px;
+      margin-top: 10px;
+    }}
+    .meeting-brief-section {{
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+    }}
+    .meeting-brief-section h4 {{
+      margin: 0;
+      font-size: 14px;
+    }}
+    .meeting-brief-section p {{
+      margin: 4px 0;
+    }}
+    .meeting-brief-section ul {{
+      margin: 0;
+      padding-left: 18px;
+    }}
+    .meeting-brief-section li + li {{
+      margin-top: 10px;
+    }}
+    .meeting-brief-health {{
+      background: color-mix(in srgb, var(--accent) 8%, var(--panel-2));
+    }}
+    .meeting-brief-raw summary {{
+      cursor: pointer;
+      color: var(--muted);
+    }}
     .advisory-meta {{
       margin-top: 8px;
       border-top: 1px solid var(--line);
@@ -4128,8 +4247,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             if extraction["result"]:
                 claude_result_panel = f"""<details class="meeting-extraction-result" open>
                   <summary>Claude draft · {esc(extraction['status'])}</summary>
-                  <p class="muted">Review this JSON before applying it to the meeting, tickets, staff, or account health.</p>
-                  <textarea readonly>{esc(extraction['result'])}</textarea>
+                  <p class="muted">Review this meeting brief before applying it to the meeting, tickets, staff, or account health.</p>
+                  {render_claude_meeting_brief(extraction['result'])}
+                  <details class="meeting-brief-raw">
+                    <summary>Raw JSON</summary>
+                    <textarea readonly>{esc(extraction['result'])}</textarea>
+                  </details>
                 </details>"""
             extraction_panel = f"""<details class="meeting-extraction">
               <summary>Extraction packet ready · {esc(extraction['updated_at'])}</summary>
