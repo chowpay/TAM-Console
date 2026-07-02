@@ -12,6 +12,8 @@ import base64
 import importlib.util
 import threading
 from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -24,6 +26,8 @@ from integrations import claude_cli, vid2kb
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "casefiles.db"
+UPLOAD_ROOT = DATA_DIR / "artifacts"
+MAX_UPLOAD_BYTES = int(os.environ.get("TAM_CONSOLE_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 ATLASSIAN_CONFIG = Path(
     os.environ.get(
         "CASEFILES_ATLASSIAN_CONFIG",
@@ -36,6 +40,7 @@ LEGACY_ATLASSIAN_CONFIG = Path(
 ALLOWED_FILE_ROOTS = (
     Path("/home/ubuntu/tag_inspect").resolve(),
     Path("/home/ubuntu/issues").resolve(),
+    UPLOAD_ROOT.resolve(),
 )
 CLAUDE_EXTRACTION_JOBS: set[str] = set()
 CLAUDE_EXTRACTION_LOCK = threading.Lock()
@@ -57,6 +62,28 @@ def slugify(value: str) -> str:
         elif keep and keep[-1] != "-":
             keep.append("-")
     return "".join(keep).strip("-") or "customer"
+
+
+def safe_filename(value: str) -> str:
+    name = Path(value or "artifact").name.strip()
+    stem = slugify(Path(name).stem)
+    suffix = Path(name).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,12}", suffix or ""):
+        suffix = ""
+    return f"{stem}{suffix}" if stem else f"artifact{suffix}"
+
+
+def unique_path(directory: Path, filename: str) -> Path:
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for index in range(2, 1000):
+        next_candidate = directory / f"{stem}-{index}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+    raise ValueError("Could not create a unique upload filename.")
 
 
 def normalize_match(value: str) -> str:
@@ -4678,6 +4705,21 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         "artifacts": f"""<section class="section">
           <h3>Artifacts</h3>
           {artifact_items or '<div class="empty">No artifacts linked yet.</div>'}
+          <details open>
+            <summary>Upload artifact</summary>
+            <form method="post" action="/customers/{esc(customer['slug'])}/artifact-upload" enctype="multipart/form-data">
+              <div class="grid-2">
+                <label>Label<input name="label" required placeholder="LIDA project documentation"></label>
+                <label>Type<input name="artifact_type" value="documentation" placeholder="documentation, pcap, diagram, finding, log"></label>
+                <label>Environment<select name="environment_id">{environment_options}</select></label>
+                <label>File<input type="file" name="artifact_file" required accept=".pdf,.png,.jpg,.jpeg,.txt,.md,.csv,.json,.drawio,.pcap,.pcapng,.zip"></label>
+              </div>
+              <label>Notes<textarea name="notes" placeholder="Source PDF from CBS for LIDA project"></textarea></label>
+              <button type="submit">Upload artifact</button>
+            </form>
+          </details>
+          <details>
+            <summary>Link existing path or URL</summary>
           <form method="post" action="/customers/{esc(customer['slug'])}/artifacts">
             <div class="grid-2">
               <label>Label<input name="label" required></label>
@@ -4688,6 +4730,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <label>Notes<textarea name="notes"></textarea></label>
             <button type="submit">Add artifact</button>
           </form>
+          </details>
         </section>""",
     }
 
@@ -4720,7 +4763,41 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
 
 def form_data(handler: BaseHTTPRequestHandler) -> dict[str, str]:
     length = int(handler.headers.get("Content-Length", "0"))
-    raw = handler.rfile.read(length).decode()
+    handler.form_values = {}
+    handler.uploads = {}
+    handler.form_error = ""
+    if length > MAX_UPLOAD_BYTES:
+        handler.form_error = f"Upload is too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+        return {}
+    content_type = handler.headers.get("Content-Type", "")
+    if content_type.startswith("multipart/form-data"):
+        raw = handler.rfile.read(length)
+        message = BytesParser(policy=email_policy).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + raw
+        )
+        parsed: dict[str, list[str]] = {}
+        uploads = {}
+        for part in message.iter_parts() if message.is_multipart() else []:
+            if part.get_content_disposition() != "form-data":
+                continue
+            key = part.get_param("name", header="content-disposition")
+            if not key:
+                continue
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                uploads[key] = {
+                    "filename": filename,
+                    "content": payload,
+                    "content_type": part.get_content_type() or "application/octet-stream",
+                }
+            else:
+                charset = part.get_content_charset() or "utf-8"
+                parsed.setdefault(key, []).append(payload.decode(charset, errors="replace"))
+        handler.form_values = parsed
+        handler.uploads = uploads
+        return {key: values[0].strip() for key, values in parsed.items()}
+    raw = handler.rfile.read(length).decode(errors="replace")
     parsed = parse_qs(raw, keep_blank_values=True)
     handler.form_values = parsed
     return {key: values[0].strip() for key, values in parsed.items()}
@@ -4790,6 +4867,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         data = form_data(self)
         ts = now_utc()
+        if getattr(self, "form_error", ""):
+            self.send_html(page("Upload failed", f"<section class='section'><h2>{esc(self.form_error)}</h2></section>"), 413)
+            return
         if path in ("/jira/import-assigned", "/jira/sync"):
             try:
                 sys.stderr.write(f"{now_utc()} starting {path}\n")
@@ -5419,6 +5499,34 @@ class Handler(BaseHTTPRequestHandler):
                         ts,
                     ),
                 )
+            elif action == "artifact-upload":
+                upload = getattr(self, "uploads", {}).get("artifact_file")
+                if not upload or not upload.get("content"):
+                    self.send_html(render_customer(slug, "artifacts", "No artifact file was uploaded."), 400)
+                    return
+                environment_id = int(data["environment_id"]) if data.get("environment_id") else None
+                upload_dir = UPLOAD_ROOT / slug
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                filename = safe_filename(upload.get("filename", "artifact"))
+                saved_path = unique_path(upload_dir, filename)
+                saved_path.write_bytes(upload["content"])
+                conn.execute(
+                    """
+                    insert into artifacts (customer_id, environment_id, label, artifact_type, path_or_url, notes, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cid,
+                        environment_id,
+                        data.get("label", "") or saved_path.stem,
+                        data.get("artifact_type", "documentation"),
+                        str(saved_path),
+                        data.get("notes", ""),
+                        ts,
+                    ),
+                )
+                message = f"Uploaded artifact {saved_path.name}."
+                redirect_section = "artifacts"
             else:
                 self.send_html(page("Bad request", "<section class='section'><h2>Bad action</h2></section>"), 400)
                 return
@@ -5438,6 +5546,7 @@ class Handler(BaseHTTPRequestHandler):
             "meeting-extract-claude": "meetings",
             "notes": "notes",
             "artifacts": "artifacts",
+            "artifact-upload": "artifacts",
         }.get(action, "overview")
         self.redirect(f"/customers/{slug}" if redirect_section == "overview" else f"/customers/{slug}/{redirect_section}")
 
