@@ -2590,6 +2590,26 @@ def page(title: str, body: str) -> bytes:
       padding-top: 10px;
       border-top: 1px solid var(--line);
     }}
+    .meeting-source {{
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+    }}
+    .meeting-source summary {{
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 650;
+    }}
+    .meeting-source .facts {{
+      margin: 10px 0;
+    }}
+    .meeting-source-block {{
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }}
     .meeting-toolbar {{
       display: flex;
       flex-wrap: wrap;
@@ -4237,6 +4257,30 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         extraction_panel = ""
         claude_button_label = "Run Claude extraction"
         claude_button_attrs = ""
+        has_claude_result = bool(extraction and extraction["result"])
+        source_link = f'<a href="{esc(m["url"])}" target="_blank">Open source</a>' if m["url"] else '<span class="muted">No source link</span>'
+        meeting_title = f"{esc(m['meeting_date'])} · {esc(m['title'])}"
+        meeting_context = f"""<p class="muted">{esc(m['environment_name']) or 'Customer-wide'} · {esc(m['attendees'])}</p>"""
+        source_panel = ""
+        summary_panel = render_meeting_text(m["summary"], compact=True)
+        actions_panel = f"""<div class="meeting-actions"><strong>Review candidates</strong>{render_meeting_text(m['actions'])}</div>"""
+        if has_claude_result:
+            meeting_title = f"{esc(m['meeting_date'])} · Meeting brief"
+            meeting_context = f"""<p class="muted">{esc(customer['name'])} · {esc(m['environment_name']) or 'Customer-wide'}</p>"""
+            summary_panel = ""
+            actions_panel = ""
+            source_panel = f"""<details class="meeting-source">
+              <summary>Source</summary>
+              <p class="muted">Original vid2kb import and deterministic candidate lines.</p>
+              <p>{source_link}</p>
+              <dl class="facts">
+                <dt>Imported title</dt><dd>{esc(m['title'])}</dd>
+                <dt>Environment</dt><dd>{esc(m['environment_name']) or 'Customer-wide'}</dd>
+                <dt>Attendees</dt><dd>{esc(m['attendees']) or '<span class="muted">Not set</span>'}</dd>
+              </dl>
+              <div class="meeting-source-block"><strong>Imported summary</strong>{render_meeting_text(m['summary'], compact=True)}</div>
+              <div class="meeting-source-block"><strong>Candidate actions</strong>{render_meeting_text(m['actions'])}</div>
+            </details>"""
         if extraction:
             if extraction["status"] == "Claude Running":
                 claude_button_label = "Claude running"
@@ -4254,19 +4298,19 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
                     <textarea readonly>{esc(extraction['result'])}</textarea>
                   </details>
                 </details>"""
-            extraction_panel = f"""<details class="meeting-extraction">
-              <summary>Extraction packet ready · {esc(extraction['updated_at'])}</summary>
+            prompt_panel = f"""<details class="meeting-extraction">
+              <summary>Prompt sent to Claude · {esc(extraction['updated_at'])}</summary>
               <p class="muted">This is the exact packet sent to Claude. It is kept here for review and debugging.</p>
               <textarea readonly>{esc(extraction['prompt'])}</textarea>
-            </details>
-            {claude_result_panel}"""
+            </details>"""
+            extraction_panel = f"{claude_result_panel}{prompt_panel}"
         return f"""<article class="item">
-          <strong>{esc(m['meeting_date'])} · {esc(m['title'])}</strong>
-          <p class="muted">{esc(m['environment_name']) or 'Customer-wide'} · {esc(m['attendees'])}</p>
-          {render_meeting_text(m['summary'], compact=True)}
-          <div class="meeting-actions"><strong>Review candidates</strong>{render_meeting_text(m['actions'])}</div>
+          <strong>{meeting_title}</strong>
+          {meeting_context}
+          {summary_panel}
+          {actions_panel}
           <div class="meeting-toolbar">
-            {f'<a href="{esc(m["url"])}" target="_blank">source</a>' if m['url'] else ''}
+            {source_link if not has_claude_result else ''}
             <form method="post" action="/customers/{esc(customer['slug'])}/meeting-extract">
               <input type="hidden" name="meeting_id" value="{m['id']}">
               <button type="submit">Extract highlights</button>
@@ -4276,6 +4320,7 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
               <button type="submit"{claude_button_attrs}>{claude_button_label}</button>
             </form>
           </div>
+          {source_panel}
           {extraction_panel}
         </article>"""
 
