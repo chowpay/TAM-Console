@@ -153,6 +153,7 @@ For AI-assisted continuation, read these tracked project notes first:
 - `docs/decisions.md`
 - `docs/connector-roadmap.md`
 - `docs/health-evaluation-rubric.md`
+- `docs/meeting-context-extraction.md`
 - `docs/backlog.md`
 
 These files are the shared handoff state for Codex, Claude, and future sessions.

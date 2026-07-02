@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -34,6 +35,10 @@ ALLOWED_FILE_ROOTS = (
     Path("/home/ubuntu/tag_inspect").resolve(),
     Path("/home/ubuntu/issues").resolve(),
 )
+VID2KB_HOST = os.environ.get("TAM_CONSOLE_VID2KB_HOST", "192.168.86.74")
+VID2KB_USER = os.environ.get("TAM_CONSOLE_VID2KB_USER", "ubuntu")
+VID2KB_KEY = Path(os.environ.get("TAM_CONSOLE_VID2KB_KEY", str(Path.home() / ".ssh" / "vid2kb_codex_ed25519")))
+VID2KB_OUTPUT_ROOT = "/home/ubuntu/vid2kb/video_manual_ingest/output"
 
 
 def now_utc() -> str:
@@ -107,6 +112,157 @@ def short_text(value: str, limit: int = 220) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def vid2kb_run_is_safe(run_name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", run_name or ""))
+
+
+def vid2kb_ssh(command: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "ssh",
+            "-i",
+            str(VID2KB_KEY),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            f"{VID2KB_USER}@{VID2KB_HOST}",
+            command,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def vid2kb_available_runs() -> list[str]:
+    if not VID2KB_KEY.exists():
+        return []
+    command = f"find {shlex.quote(VID2KB_OUTPUT_ROOT)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' | sort"
+    result = vid2kb_ssh(command, timeout=5)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if vid2kb_run_is_safe(line.strip())]
+
+
+def vid2kb_read_file(run_name: str, relative_path: str, max_bytes: int = 120000) -> str:
+    if not vid2kb_run_is_safe(run_name):
+        raise ValueError("Unsafe vid2kb run name.")
+    safe_relative = relative_path.strip("/")
+    command = (
+        f"cd {shlex.quote(VID2KB_OUTPUT_ROOT)} && "
+        f"test -f {shlex.quote(run_name + '/' + safe_relative)} && "
+        f"head -c {int(max_bytes)} {shlex.quote(run_name + '/' + safe_relative)}"
+    )
+    result = vid2kb_ssh(command, timeout=10)
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def vid2kb_run_date(run_name: str) -> str:
+    if not vid2kb_run_is_safe(run_name):
+        return now_utc()[:10]
+    command = (
+        f"stat -c '%y' {shlex.quote(VID2KB_OUTPUT_ROOT + '/' + run_name + '/docs_manifest.json')} "
+        f"2>/dev/null | cut -d' ' -f1"
+    )
+    result = vid2kb_ssh(command, timeout=5)
+    date_text = result.stdout.strip()
+    return date_text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text) else now_utc()[:10]
+
+
+def vid2kb_candidate_actions(transcript: str, limit: int = 12) -> list[str]:
+    candidates = []
+    patterns = ("action", "follow", "need", "needs", "issue", "problem", "question", "confirm", "verify", "check", "workaround", "todo")
+    for raw_line in transcript.splitlines():
+        line = raw_line.strip("- ").strip()
+        if not line or line.lower().startswith(("source video:", "provenance:")):
+            continue
+        if any(pattern in line.lower() for pattern in patterns):
+            candidates.append(short_text(line, 240))
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def vid2kb_overview_summary(overview: str, limit: int = 10) -> str:
+    lines = []
+    in_summary = False
+    for raw_line in overview.splitlines():
+        line = raw_line.strip()
+        if line.lower() == "## summary":
+            in_summary = True
+            continue
+        if in_summary and line.startswith("## "):
+            break
+        if in_summary and line.startswith("- "):
+            lines.append(line[2:])
+        if len(lines) >= limit:
+            break
+    if not lines:
+        lines = [line.strip("- ") for line in overview.splitlines() if line.startswith("- ")][:limit]
+    return "\n".join(f"- {short_text(line, 260)}" for line in lines)
+
+
+def import_vid2kb_meeting(conn: sqlite3.Connection, customer_id: int, run_name: str, ts: str) -> str:
+    if not vid2kb_run_is_safe(run_name):
+        return "Invalid vid2kb run name."
+    overview = vid2kb_read_file(run_name, "docs/overview.md")
+    transcript = vid2kb_read_file(run_name, "cleaned_transcript.md")
+    if not overview and not transcript:
+        return f"No readable vid2kb artifacts found for {run_name}."
+    meeting_date = vid2kb_run_date(run_name)
+    summary = vid2kb_overview_summary(overview or transcript)
+    action_candidates = vid2kb_candidate_actions(transcript)
+    actions = (
+        "AI review needed. Candidate follow-up lines from transcript:\n"
+        + "\n".join(f"- {line}" for line in action_candidates)
+        if action_candidates
+        else "AI review needed. No deterministic action candidates found."
+    )
+    source_root = f"ssh://{VID2KB_USER}@{VID2KB_HOST}{VID2KB_OUTPUT_ROOT}/{run_name}"
+    conn.execute(
+        """
+        insert into meetings
+          (customer_id, environment_id, meeting_date, title, attendees, summary, actions, url, created_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            customer_id,
+            None,
+            meeting_date,
+            f"vid2kb import: {run_name}",
+            "",
+            summary,
+            actions,
+            source_root,
+            ts,
+        ),
+    )
+    artifacts = [
+        ("vid2kb overview", "vid2kb", f"{source_root}/docs/overview.md", "Generated overview from meeting video."),
+        ("vid2kb transcript", "transcript", f"{source_root}/cleaned_transcript.md", "Cleaned transcript from meeting video."),
+        ("vid2kb timeline", "timeline", f"{source_root}/timeline.json", "Merged speech and visual evidence timeline."),
+    ]
+    added_artifacts = 0
+    for label, artifact_type, path_or_url, notes in artifacts:
+        exists = conn.execute(
+            "select 1 from artifacts where customer_id = ? and path_or_url = ?",
+            (customer_id, path_or_url),
+        ).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            "insert into artifacts (customer_id, environment_id, label, artifact_type, path_or_url, notes, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+            (customer_id, None, label, artifact_type, path_or_url, notes, ts),
+        )
+        added_artifacts += 1
+    return f"Imported vid2kb run {run_name} as a meeting draft and linked {added_artifacts} artifact(s). Review the summary/actions before treating them as final."
 
 
 def render_tags(value: str) -> str:
@@ -3709,6 +3865,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
     source_type_datalist = "".join(
         f'<option value="{esc(option)}"></option>' for option in SOURCE_TYPE_SUGGESTIONS
     )
+    vid2kb_runs = vid2kb_available_runs()
+    vid2kb_run_options = "".join(f'<option value="{esc(run_name)}">{esc(run_name)}</option>' for run_name in vid2kb_runs)
     customer_status_options = ("Active", "Imported", "Watching", "Inactive", "Archived")
     def customer_status_select(selected: str = "") -> str:
         options = []
@@ -4108,6 +4266,14 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         "meetings": f"""<section class="section">
           <h3>Meetings</h3>
           {meeting_items or '<div class="empty">No meeting notes yet.</div>'}
+          <details>
+            <summary>Import from vid2kb</summary>
+            {f'''<form method="post" action="/customers/{esc(customer['slug'])}/vid2kb-import">
+              <label>vid2kb run<select name="run_name">{vid2kb_run_options}</select></label>
+              <p class="muted">Creates a reviewable meeting draft and links transcript, timeline, and overview artifacts. AI extraction should review this draft before updating account health, next actions, or durable facts.</p>
+              <button type="submit">Import vid2kb run</button>
+            </form>''' if vid2kb_run_options else '<p class="muted">No vid2kb output runs found or SSH access is unavailable.</p>'}
+          </details>
           <form method="post" action="/customers/{esc(customer['slug'])}/meetings">
             <div class="grid-2">
               <label>Date<input name="meeting_date" required placeholder="YYYY-MM-DD"></label>
@@ -4834,6 +5000,9 @@ class Handler(BaseHTTPRequestHandler):
                         ts,
                     ),
                 )
+            elif action == "vid2kb-import":
+                message = import_vid2kb_meeting(conn, cid, data.get("run_name", ""), ts)
+                redirect_section = "meetings"
             elif action == "notes":
                 environment_id = int(data["environment_id"]) if data.get("environment_id") else None
                 conn.execute(
@@ -4882,6 +5051,7 @@ class Handler(BaseHTTPRequestHandler):
             "hardware": "hardware",
             "software": "software",
             "meetings": "meetings",
+            "vid2kb-import": "meetings",
             "notes": "notes",
             "artifacts": "artifacts",
         }.get(action, "overview")
