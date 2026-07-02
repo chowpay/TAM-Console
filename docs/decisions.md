@@ -24,8 +24,8 @@ session context limits.
   group.
 - Customer status is separate from sidebar visibility.
 - Customers may need brand/acquisition/person routing. Example: a ticket may
-  have Jira Organization `Paramount`, but still belong operationally to CBS
-  Studios because of requester identity, customer field text, legacy brand, or
+  have one Jira Organization, but still belong operationally to another account
+  because of requester identity, customer field text, legacy brand, or
   environment context.
 - Organization-only routing is not sufficient for merged or renamed customers.
 
@@ -49,8 +49,9 @@ session context limits.
 - AI can help discover or summarize messy cases, but direct API sync should own
   routine refresh.
 - Organization changes in Jira should reconcile local ticket/customer links.
-- Future Jira routing should support rules such as `Organization = Paramount`
-  plus requester/person/customer-field/environment terms maps to CBS Studios.
+- Future Jira routing should support rules such as organization plus
+  requester/person/customer-field/environment terms mapping to the correct
+  managed account.
 
 ## Connectors
 

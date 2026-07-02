@@ -4979,12 +4979,12 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
             <summary>Upload artifact</summary>
             <form method="post" action="/customers/{esc(customer['slug'])}/artifact-upload" enctype="multipart/form-data">
               <div class="grid-2">
-                <label>Label<input name="label" required placeholder="LIDA project documentation"></label>
+                <label>Label<input name="label" required placeholder="Project documentation"></label>
                 <label>Type<input name="artifact_type" value="documentation" placeholder="documentation, pcap, diagram, finding, log"></label>
                 <label>Environment<select name="environment_id">{environment_options}</select></label>
                 <label>File<input type="file" name="artifact_file" required accept=".pdf,.png,.jpg,.jpeg,.txt,.md,.csv,.json,.drawio,.pcap,.pcapng,.zip"></label>
               </div>
-              <label>Notes<textarea name="notes" placeholder="Source PDF from CBS for LIDA project"></textarea></label>
+              <label>Notes<textarea name="notes" placeholder="Source PDF or customer-provided reference document"></textarea></label>
               <button type="submit">Upload artifact</button>
             </form>
           </details>

@@ -9,8 +9,8 @@ Concrete future work for TAM Console.
 - Add a formal Staff import workflow instead of one-off scripts.
 - Tighten CS ticket discovery to reduce false positives from broad text search.
 - Add customer routing rules for acquisitions, renamed brands, and key people,
-  such as mapping some Paramount tickets to CBS Studios when requester/person or
-  customer-field context indicates CBS.
+  such as mapping tickets to the right managed account when requester/person or
+  customer-field context differs from the Jira organization value.
 - Add customer-visible counts for hidden customers and possibly hidden tickets
   or archived records.
 - Add edit/delete flows for manually entered records where missing.

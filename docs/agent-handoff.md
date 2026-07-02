@@ -87,9 +87,9 @@ setsid -f python3 /home/ubuntu/TAM-Console/app.py >> /home/ubuntu/TAM-Console/da
   ticket organization links.
 - Jira feature-request tickets may use `FR-*` browse links that resolve to
   current `MB-*` keys.
-- Acquisition/brand routing is an open problem: CBS Studios may need selected
-  Paramount-organization tickets routed to CBS based on requester/person/text
-  context.
+- Acquisition/brand routing is an open problem: selected tickets may need to be
+  routed to a managed account based on requester/person/text context rather
+  than only the Jira organization value.
 - Local artifacts under approved roots can be linked and previewed.
 
 ## Data Boundaries
