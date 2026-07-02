@@ -21,16 +21,10 @@ def normalize_json_output(value: str) -> str:
     return "\n".join(lines).strip()
 
 
-def run_meeting_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
+def run_extraction(prompt: str, system_prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
     if not CLAUDE_CLI.exists():
         return False, f"Claude CLI not found at {CLAUDE_CLI}."
 
-    system_prompt = (
-        "You are TAM Console's meeting intelligence worker. Use only the extraction "
-        "packet provided by the user. Do not use tools, browse, read files, or infer "
-        "facts beyond the provided evidence. Return only valid JSON matching the "
-        "requested schema; no markdown and no explanatory text outside the JSON."
-    )
     cmd = [
         str(CLAUDE_CLI),
         "--print",
@@ -67,3 +61,23 @@ def run_meeting_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple
     if not output:
         return False, "Claude extraction returned no output."
     return True, output
+
+
+def run_meeting_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
+    system_prompt = (
+        "You are TAM Console's meeting intelligence worker. Use only the extraction "
+        "packet provided by the user. Do not use tools, browse, read files, or infer "
+        "facts beyond the provided evidence. Return only valid JSON matching the "
+        "requested schema; no markdown and no explanatory text outside the JSON."
+    )
+    return run_extraction(prompt, system_prompt, timeout)
+
+
+def run_document_extraction(prompt: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[bool, str]:
+    system_prompt = (
+        "You are TAM Console's document intelligence worker. Use only the extraction "
+        "packet provided by the user. Do not use tools, browse, read files, or infer "
+        "facts beyond the provided evidence. Return only valid JSON matching the "
+        "requested schema; no markdown and no explanatory text outside the JSON."
+    )
+    return run_extraction(prompt, system_prompt, timeout)

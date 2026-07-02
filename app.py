@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-from extractors import meeting_intelligence
+from extractors import document_intelligence, meeting_intelligence
 from integrations import claude_cli, vid2kb
 
 ROOT = Path(__file__).resolve().parent
@@ -44,6 +44,8 @@ ALLOWED_FILE_ROOTS = (
 )
 CLAUDE_EXTRACTION_JOBS: set[str] = set()
 CLAUDE_EXTRACTION_LOCK = threading.Lock()
+DOCUMENT_EXTRACTION_JOBS: set[str] = set()
+DOCUMENT_EXTRACTION_LOCK = threading.Lock()
 
 
 def now_utc() -> str:
@@ -189,14 +191,16 @@ def render_json_list(items: object, title_key: str = "title", body_key: str = "s
     for item in items[:limit]:
         if isinstance(item, dict):
             title = item.get(title_key) or item.get("task") or item.get("decision") or item.get("question") or item.get("risk") or item.get("request") or item.get("key") or "Item"
-            body = item.get(body_key) or item.get("details") or item.get("relevance") or item.get("severity") or ""
+            body = item.get(body_key) or item.get("details") or item.get("detail") or item.get("description") or item.get("meaning") or item.get("relevance") or item.get("severity") or ""
             meta = []
-            for key in ("owner", "due_date", "priority", "linked_tickets"):
+            for key in ("owner", "due_date", "priority", "confidence", "linked_tickets", "evidence"):
                 value = item.get(key)
                 if isinstance(value, list):
                     value = ", ".join(str(v) for v in value if v)
+                elif isinstance(value, dict):
+                    value = json.dumps(value, sort_keys=True)
                 if value:
-                    meta.append(f"{key.replace('_', ' ').title()}: {value}")
+                    meta.append(f"{key.replace('_', ' ').title()}: {short_text(str(value), 260)}")
             rows_html.append(
                 f"""<li>
                   <strong>{esc(title)}</strong>
@@ -246,6 +250,48 @@ def render_claude_meeting_brief(result: str) -> str:
             )
     if not sections:
         return '<p class="muted">No structured meeting brief fields were returned.</p>'
+    return '<div class="meeting-brief">' + "".join(sections) + "</div>"
+
+
+def render_claude_document_brief(result: str) -> str:
+    data = parse_claude_json_result(result)
+    if not data:
+        return '<p class="muted">Claude returned text that could not be parsed as JSON. Use the Raw JSON section below.</p>'
+
+    sections = []
+    summary = data.get("executive_summary")
+    goal = data.get("customer_goal")
+    if summary or goal:
+        sections.append(
+            f"""<section class="meeting-brief-section meeting-brief-health">
+              <h4>What they want to do</h4>
+              {f'<p>{esc(goal)}</p>' if goal else ''}
+              {f'<p>{esc(summary)}</p>' if summary else ''}
+            </section>"""
+        )
+    section_defs = (
+        ("Requested capabilities", "requested_capabilities", "capability", "details"),
+        ("Workflows", "workflows", "name", "details"),
+        ("Technical requirements", "technical_requirements", "requirement", "details"),
+        ("Assumptions", "assumptions", "assumption", "details"),
+        ("Open questions", "open_questions", "question", ""),
+        ("Action items", "action_items", "task", ""),
+        ("Risks", "risks", "risk", "severity"),
+        ("Related tickets", "related_tickets", "key", "relevance"),
+        ("Environment references", "environment_references", "name", "details"),
+        ("Terms", "terms", "term", "meaning"),
+    )
+    for heading, key, title_key, body_key in section_defs:
+        body = render_json_list(data.get(key), title_key, body_key)
+        if body:
+            sections.append(
+                f"""<section class="meeting-brief-section">
+                  <h4>{esc(heading)}</h4>
+                  {body}
+                </section>"""
+            )
+    if not sections:
+        return '<p class="muted">No structured document brief fields were returned.</p>'
     return '<div class="meeting-brief">' + "".join(sections) + "</div>"
 
 
@@ -482,6 +528,162 @@ def queue_claude_meeting_extraction(conn: sqlite3.Connection, customer_id: int, 
     )
     worker.start()
     return "Claude extraction started in the background. Refresh this meeting page to see when the draft is ready."
+
+
+def build_artifact_extraction_packet(customer_id: int, artifact_id: int) -> tuple[dict, str, str]:
+    customer = row("select * from customers where id = ?", (customer_id,))
+    artifact = row("select * from artifacts where id = ? and customer_id = ?", (artifact_id, customer_id))
+    if not customer or not artifact:
+        raise ValueError("Artifact not found.")
+    local_path = allowed_local_file(artifact["path_or_url"])
+    if local_path is None:
+        raise ValueError("Only uploaded/local artifacts can be extracted right now.")
+    extracted_text, extraction_method = document_intelligence.extract_document_text(local_path)
+    if not extracted_text.strip():
+        raise ValueError(f"No readable text could be extracted from this artifact ({extraction_method}).")
+    ticket_rows = rows(
+        """
+        select key, summary, status, priority, assignee, updated, notes
+        from tickets
+        where customer_id = ?
+        order by updated desc, key
+        limit 40
+        """,
+        (customer_id,),
+    )
+    environment_rows = rows(
+        """
+        select name, env_type, location, status, source_types, products, architecture, notes
+        from environments
+        where customer_id = ?
+        order by name
+        """,
+        (customer_id,),
+    )
+    meeting_rows = rows(
+        """
+        select meeting_date, title, summary, actions, url
+        from meetings
+        where customer_id = ?
+        order by meeting_date desc, id desc
+        limit 8
+        """,
+        (customer_id,),
+    )
+    return (
+        {
+            "customer": {
+                "name": customer["name"],
+                "aliases": customer["aliases"],
+                "status": customer["status"],
+                "manual_health": customer["health"],
+                "owner": customer["owner"],
+                "products": customer["products"],
+                "overview": customer["overview"],
+                "architecture": customer["architecture"],
+            },
+            "artifact": {
+                "id": artifact["id"],
+                "label": artifact["label"],
+                "type": artifact["artifact_type"],
+                "path_or_url": artifact["path_or_url"],
+                "notes": artifact["notes"],
+                "created_at": artifact["created_at"],
+            },
+            "extraction": {
+                "method": extraction_method,
+                "source_characters": len(extracted_text),
+                "text_truncated": len(extracted_text) >= document_intelligence.MAX_TEXT_CHARS,
+            },
+            "tickets": [dict(ticket) for ticket in ticket_rows],
+            "environments": [dict(env) for env in environment_rows],
+            "recent_meetings": [dict(meeting) for meeting in meeting_rows],
+            "document_text": extracted_text,
+        },
+        extracted_text,
+        extraction_method,
+    )
+
+
+def create_artifact_extraction(conn: sqlite3.Connection, customer_id: int, artifact_id: int, ts: str) -> str:
+    packet, extracted_text, _method = build_artifact_extraction_packet(customer_id, artifact_id)
+    prompt = document_intelligence.build_extraction_prompt(packet)
+    existing = conn.execute(
+        "select id from artifact_extractions where customer_id = ? and artifact_id = ? order by id desc limit 1",
+        (customer_id, artifact_id),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "update artifact_extractions set status = ?, prompt = ?, extracted_text = ?, result = ?, updated_at = ? where id = ?",
+            ("Draft", prompt, extracted_text, "", ts, existing["id"]),
+        )
+        return "Rebuilt document extraction packet."
+    conn.execute(
+        """
+        insert into artifact_extractions
+          (customer_id, artifact_id, status, prompt, extracted_text, result, created_at, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (customer_id, artifact_id, "Draft", prompt, extracted_text, "", ts, ts),
+    )
+    return "Created document extraction packet."
+
+
+def _run_claude_artifact_extraction_job(customer_id: int, artifact_id: int, extraction_id: int, job_key: str) -> None:
+    try:
+        with db() as conn:
+            extraction = conn.execute(
+                "select prompt from artifact_extractions where id = ? and customer_id = ? and artifact_id = ?",
+                (extraction_id, customer_id, artifact_id),
+            ).fetchone()
+        if not extraction or not extraction["prompt"]:
+            status, result = "Claude Error", "No document extraction packet was available for Claude."
+        else:
+            status_ok, result = claude_cli.run_document_extraction(extraction["prompt"])
+            status = "Claude Draft" if status_ok else "Claude Error"
+        with db() as conn:
+            conn.execute(
+                "update artifact_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+                (status, result, now_utc(), extraction_id),
+            )
+    except Exception as exc:
+        with db() as conn:
+            conn.execute(
+                "update artifact_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+                ("Claude Error", f"Document extraction worker failed: {exc}", now_utc(), extraction_id),
+            )
+    finally:
+        with DOCUMENT_EXTRACTION_LOCK:
+            DOCUMENT_EXTRACTION_JOBS.discard(job_key)
+
+
+def queue_claude_artifact_extraction(conn: sqlite3.Connection, customer_id: int, artifact_id: int, ts: str) -> str:
+    job_key = f"{customer_id}:{artifact_id}"
+    with DOCUMENT_EXTRACTION_LOCK:
+        if job_key in DOCUMENT_EXTRACTION_JOBS:
+            return "Document extraction is already running for this artifact."
+    create_artifact_extraction(conn, customer_id, artifact_id, ts)
+    extraction = conn.execute(
+        "select id, prompt from artifact_extractions where customer_id = ? and artifact_id = ? order by id desc limit 1",
+        (customer_id, artifact_id),
+    ).fetchone()
+    if not extraction or not extraction["prompt"]:
+        return "No document extraction packet was available for Claude."
+
+    with DOCUMENT_EXTRACTION_LOCK:
+        DOCUMENT_EXTRACTION_JOBS.add(job_key)
+    conn.execute(
+        "update artifact_extractions set status = ?, result = ?, updated_at = ? where id = ?",
+        ("Claude Running", "", ts, extraction["id"]),
+    )
+    conn.commit()
+    worker = threading.Thread(
+        target=_run_claude_artifact_extraction_job,
+        args=(customer_id, artifact_id, extraction["id"], job_key),
+        daemon=True,
+    )
+    worker.start()
+    return "Document extraction started in the background. Refresh this artifact page to see when the brief is ready."
 
 
 def render_tags(value: str) -> str:
@@ -1119,6 +1321,18 @@ def init_db() -> None:
               meeting_id integer not null references meetings(id) on delete cascade,
               status text default 'Draft',
               prompt text default '',
+              result text default '',
+              created_at text not null,
+              updated_at text not null
+            );
+
+            create table if not exists artifact_extractions (
+              id integer primary key,
+              customer_id integer not null references customers(id) on delete cascade,
+              artifact_id integer not null references artifacts(id) on delete cascade,
+              status text default 'Draft',
+              prompt text default '',
+              extracted_text text default '',
               result text default '',
               created_at text not null,
               updated_at text not null
@@ -2319,7 +2533,7 @@ def sync_jira() -> str:
     return " ".join(details)
 
 
-def render_artifact_item(artifact: sqlite3.Row) -> str:
+def render_artifact_item(artifact: sqlite3.Row, customer_slug: str = "", extraction: sqlite3.Row | None = None) -> str:
     path_or_url = artifact["path_or_url"]
     url = local_file_url(path_or_url)
     preview = (
@@ -2327,11 +2541,51 @@ def render_artifact_item(artifact: sqlite3.Row) -> str:
         if is_image_path(path_or_url)
         else ""
     )
+    extraction_panel = ""
+    button_label = "Extract document notes"
+    button_attrs = ""
+    if extraction:
+        if extraction["status"] == "Claude Running":
+            button_label = "Document extraction running"
+            button_attrs = " disabled"
+        elif extraction["result"]:
+            button_label = "Re-run document extraction"
+            extraction_panel = f"""<details class="meeting-extraction-result" open>
+              <summary>Document brief · {esc(extraction['status'])}</summary>
+              <p class="muted">Review this document brief before applying it to the customer profile, tickets, or environment notes.</p>
+              {render_claude_document_brief(extraction['result'])}
+              <details class="meeting-brief-raw">
+                <summary>Raw JSON</summary>
+                <textarea readonly>{esc(extraction['result'])}</textarea>
+              </details>
+            </details>"""
+        else:
+            button_label = "Run document extraction"
+    prompt_panel = ""
+    if extraction and extraction["prompt"]:
+        prompt_panel = f"""<details class="meeting-extraction">
+          <summary>Prompt sent to Claude · {esc(extraction['updated_at'])}</summary>
+          <p class="muted">This includes the extracted document text and bounded customer context.</p>
+          <textarea readonly>{esc(extraction['prompt'])}</textarea>
+        </details>"""
+    extract_form = ""
+    if (
+        customer_slug
+        and allowed_local_file(path_or_url) is not None
+        and path_or_url.lower().endswith((".pdf", ".txt", ".md", ".csv", ".json", ".log"))
+    ):
+        extract_form = f"""<form method="post" action="/customers/{esc(customer_slug)}/artifact-extract">
+          <input type="hidden" name="artifact_id" value="{artifact['id']}">
+          <button type="submit"{button_attrs}>{button_label}</button>
+        </form>"""
     return f"""<article class="item">
       <strong>{esc(artifact['label'])}</strong> <span class="tag">{esc(artifact['artifact_type'])}</span>
       {preview}
       <p><a href="{esc(url)}" target="_blank">{esc(path_or_url)}</a></p>
       <p class="muted">{esc(artifact['environment_name']) or 'Customer-wide'} · {esc(artifact['notes'])}</p>
+      <div class="meeting-toolbar">{extract_form}</div>
+      {extraction_panel}
+      {prompt_panel}
     </article>"""
 
 
@@ -4138,6 +4392,18 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         """,
         (cid,),
     )
+    artifact_extraction_rows = rows(
+        """
+        select *
+        from artifact_extractions
+        where customer_id = ?
+        order by updated_at desc, id desc
+        """,
+        (cid,),
+    )
+    artifact_extractions_by_artifact = {}
+    for extraction in artifact_extraction_rows:
+        artifact_extractions_by_artifact.setdefault(extraction["artifact_id"], extraction)
     hardware = rows(
         """
         select h.*, e.name as environment_name
@@ -4361,7 +4627,10 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         </article>"""
         for n in notes
     )
-    artifact_items = "".join(render_artifact_item(a) for a in artifacts)
+    artifact_items = "".join(
+        render_artifact_item(a, customer["slug"], artifact_extractions_by_artifact.get(a["id"]))
+        for a in artifacts
+    )
     architecture_artifacts = [
         a
         for a in artifacts
@@ -4373,7 +4642,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         )
     ]
     architecture_artifact_items = "".join(
-        render_artifact_item(a) for a in architecture_artifacts
+        render_artifact_item(a, customer["slug"], artifact_extractions_by_artifact.get(a["id"]))
+        for a in architecture_artifacts
     )
     hardware_rows = "".join(
         f"""<tr>
@@ -5527,6 +5797,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 message = f"Uploaded artifact {saved_path.name}."
                 redirect_section = "artifacts"
+            elif action == "artifact-extract":
+                artifact_id = int(data.get("artifact_id", "0") or "0")
+                try:
+                    message = queue_claude_artifact_extraction(conn, cid, artifact_id, ts)
+                except Exception as exc:
+                    message = f"Document extraction failed to start: {exc}"
+                redirect_section = "artifacts"
             else:
                 self.send_html(page("Bad request", "<section class='section'><h2>Bad action</h2></section>"), 400)
                 return
@@ -5547,6 +5824,7 @@ class Handler(BaseHTTPRequestHandler):
             "notes": "notes",
             "artifacts": "artifacts",
             "artifact-upload": "artifacts",
+            "artifact-extract": "artifacts",
         }.get(action, "overview")
         self.redirect(f"/customers/{slug}" if redirect_section == "overview" else f"/customers/{slug}/{redirect_section}")
 
