@@ -114,6 +114,56 @@ def short_text(value: str, limit: int = 220) -> str:
     return text[: max(0, limit - 1)].rstrip() + "..."
 
 
+def clean_vid2kb_line(value: str) -> str:
+    text = value.strip().lstrip("-").strip()
+    text = re.sub(r"^`?\d{2}:\d{2}:\d{2}(?:\.\d+)?`?\s*", "", text)
+    text = re.sub(r"^speech:\s*", "", text, flags=re.IGNORECASE)
+    text = re.split(r"\s+\|\s+visual:\s+", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    return short_text(text, 260)
+
+
+def compact_meeting_lines(lines: list[str], limit: int = 8) -> list[str]:
+    chunks = []
+    current = ""
+    for line in lines:
+        if not line:
+            continue
+        candidate = f"{current} {line}".strip() if current else line
+        if current and (len(candidate) > 220 or current.endswith((".", "?", "!"))):
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+        if len(chunks) >= limit:
+            break
+    if current and len(chunks) < limit:
+        chunks.append(current)
+    return chunks
+
+
+def render_meeting_text(value: str, compact: bool = False) -> str:
+    text = (value or "").strip()
+    if not text:
+        return '<span class="muted">Not set</span>'
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    intro = []
+    bullets = []
+    for line in lines:
+        if line.startswith("- "):
+            cleaned = clean_vid2kb_line(line)
+            if cleaned:
+                bullets.append(cleaned)
+        else:
+            intro.append(line)
+    if compact:
+        bullets = compact_meeting_lines(bullets)
+    intro_html = "".join(f"<p>{esc(short_text(line, 320))}</p>" for line in intro)
+    bullet_html = ""
+    if bullets:
+        bullet_html = "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in bullets) + "</ul>"
+    return f'<div class="meeting-text">{intro_html}{bullet_html}</div>'
+
+
 def vid2kb_run_is_safe(run_name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9._-]+", run_name or ""))
 
@@ -184,7 +234,7 @@ def vid2kb_candidate_actions(transcript: str, limit: int = 12) -> list[str]:
         if not line or line.lower().startswith(("source video:", "provenance:")):
             continue
         if any(pattern in line.lower() for pattern in patterns):
-            candidates.append(short_text(line, 240))
+            candidates.append(clean_vid2kb_line(line))
         if len(candidates) >= limit:
             break
     return candidates
@@ -201,12 +251,14 @@ def vid2kb_overview_summary(overview: str, limit: int = 10) -> str:
         if in_summary and line.startswith("## "):
             break
         if in_summary and line.startswith("- "):
-            lines.append(line[2:])
+            cleaned = clean_vid2kb_line(line)
+            if cleaned:
+                lines.append(cleaned)
         if len(lines) >= limit:
             break
     if not lines:
-        lines = [line.strip("- ") for line in overview.splitlines() if line.startswith("- ")][:limit]
-    return "\n".join(f"- {short_text(line, 260)}" for line in lines)
+        lines = [clean_vid2kb_line(line) for line in overview.splitlines() if line.startswith("- ")][:limit]
+    return "Meeting draft from vid2kb. Review before saving as final account context.\n" + "\n".join(f"- {line}" for line in lines if line)
 
 
 def import_vid2kb_meeting(conn: sqlite3.Connection, customer_id: int, run_name: str, ts: str) -> str:
@@ -2370,6 +2422,23 @@ def page(title: str, body: str) -> bytes:
     .item {{ padding: 14px; }}
     .item + .item {{ margin-top: 10px; }}
     .item p {{ margin: 8px 0; }}
+    .meeting-text {{
+      display: grid;
+      gap: 6px;
+      margin: 8px 0;
+    }}
+    .meeting-text ul {{
+      margin: 0;
+      padding-left: 20px;
+    }}
+    .meeting-text li {{
+      margin: 4px 0;
+    }}
+    .meeting-actions {{
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }}
     .advisory-meta {{
       margin-top: 8px;
       border-top: 1px solid var(--line);
@@ -3945,8 +4014,8 @@ def render_customer(slug: str, section: str = "overview", message: str = "") -> 
         f"""<article class="item">
           <strong>{esc(m['meeting_date'])} · {esc(m['title'])}</strong>
           <p class="muted">{esc(m['environment_name']) or 'Customer-wide'} · {esc(m['attendees'])}</p>
-          <p>{esc(m['summary'])}</p>
-          <p><strong>Actions:</strong> {esc(m['actions'])}</p>
+          {render_meeting_text(m['summary'], compact=True)}
+          <div class="meeting-actions"><strong>Review candidates</strong>{render_meeting_text(m['actions'])}</div>
           {f'<a href="{esc(m["url"])}" target="_blank">source</a>' if m['url'] else ''}
         </article>"""
         for m in meetings
